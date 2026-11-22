@@ -2787,8 +2787,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Offline pipeline archive missing for the device GPU
 
 - **Symptom:** `pipeline archive bundled with the app: none for this GPU (...)`: the device builds the bases itself although the app carries an offline archive.
-- **Cause:** each archive targets one GPU architecture. The iOS packers defaulted to `g18p` for profiles with `pso_mtl4 on`; another GPU family needed an explicit build override.
-- **Fix:** both packers also read the optional profile key `pso_gpu` behind the existing `pso_mtl4 on` gate. It names the families to build for; explicit build overrides still win. Without the new key, opted-in profiles retain `g18p`; profiles with Metal 4 off retain no archive. See [archive target selection](../development.md#the-pipeline-archive-made-offline).
+- **Cause:** each archive targets one GPU architecture. Upstream packers defaulted to `g18p` for profiles with `pso_mtl4 on`; another GPU family needed an explicit build override.
+- **Fix:** both packers also read the optional profile key `pso_gpu` behind the existing `pso_mtl4 on` gate. It names the families to build for; explicit build overrides still win. This A16 fork defaults to `none` without `pso_gpu` (device builds bases on first start; pack with `--gpu g15p` after measuring); profiles with Metal 4 off retain no archive. See [archive target selection](../development.md#the-pipeline-archive-made-offline).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#offline-pipeline-archive-probe). Its note records the contributor's Mac build probe and the outstanding device checks.
 - **Check:** `dm/tools/tests/test_game_profile.py` validates the key; `dm/tools/tests/test_pso_offline.py` exercises both packers' selection and override precedence with synthetic profiles.
 
