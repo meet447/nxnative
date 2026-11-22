@@ -3321,7 +3321,7 @@ def say_push_romfs(image, bundle_id, romfs_url=''):
     if romfs_url:
         say('the game files are not in this IPA; the app will download them from:')
         PROG.say(f'  {romfs_url}')
-        say(f'upload this file to that URL (same bytes the build used for romfs.id):')
+        say('upload this file to that URL (same bytes the build used for romfs.id):')
         PROG.say(f'  {image}')
         say('or push once with the Mac (optional):')
     else:

@@ -24,7 +24,7 @@ struct Setting: Decodable, Identifiable {
         switch kind {
         case "choice": return options?.contains { $0[0] == v } ?? false
         case "range":
-            guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }   // no hex: launcher.c's check agrees
+            guard let first = v.first, !first.isWhitespace, !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }   // no hex, no leading space: launcher.c's check agrees
             return n >= lo && n <= hi
         case "toggle": return v == onValue || v == offValue
         default: return true
