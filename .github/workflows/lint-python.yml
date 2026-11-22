@@ -6,10 +6,8 @@
 name: lint-python
 
 on:
+  # A16 fork: no push-to-main; PR path filter + manual only.
   pull_request:
-    paths: ['**.py', pyproject.toml, .github/requirements/lint.txt, .github/workflows/lint-python.yml, dm/tools/lint_python_baseline.tsv]
-  push:
-    branches: [main]
     paths: ['**.py', pyproject.toml, .github/requirements/lint.txt, .github/workflows/lint-python.yml, dm/tools/lint_python_baseline.tsv]
   workflow_dispatch:
 

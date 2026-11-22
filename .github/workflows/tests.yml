@@ -4,19 +4,17 @@
 name: tests
 
 on:
+  # A16 fork: do not run on every push to main (that queued many xcode-27 jobs and blocked IPA builds). PR + manual only.
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A new commit on a pull request replaces its older run. A push to main never cancels: main's pushes come faster than a run gets runners and finishes, so cancelling left main
-# with no finished run for 87 commits. The running one finishes and only the newest push waits behind it (GitHub replaces an older waiting run).
+# A new commit on a pull request replaces its older run.
 concurrency:
   group: tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   # The toolchain the project supports (README: Xcode 27.2; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
