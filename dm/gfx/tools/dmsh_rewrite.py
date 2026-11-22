@@ -22,7 +22,7 @@ def per_vertex(msl):
     the three values with the barycentric coordinates themselves). SPIRV-Cross has no MSL form of SPIR-V's PerVertexKHR, so the translator declares each vertex read as a flat
     input of its own, dm_pv<L>_<v> at user(locn<64 + 3L + v>) (InstEmitAmpereMem ALdTram). Here the reads of attribute L become one vertex_value<float4> at user(locn<L>), which the
     vertex shader's output there feeds, and each read that vertex's get(vertex_index::...): the vertices the [[barycentric_coord]] weights refer to, as on NVIDIA.
-    vertex_value is MSL 4.0 (macOS 26, iOS 26): the Mac's deployment target has it, and ios_metal.compile compiles a source using it with -std=metal4.0.
+    vertex_value is MSL 4.0 (macOS 26, iOS 26): the Mac's deployment target has it, and ios_metal.compile uses -std=metal4.0 for every iPhone library (min iOS 26).
     Raises ValueError when attribute L is also an ordinary input of the shader, which one location cannot be at once (no game known)"""
     found = list(PER_VERTEX_IN.finditer(msl))
     if not found: return msl
