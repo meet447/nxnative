@@ -3,3 +3,6 @@ t_fmt_mtl
 *.dSYM
 asan/
 cov/
+astcenc/
+libastcenc.a
+t_astcenc

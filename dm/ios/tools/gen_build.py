@@ -13,8 +13,8 @@ subprocess.run(['make', '-s', '-C', host, 'game_profile', 'host_msl', 'MSL_SDK=i
 cmd = subprocess.run(['make', '-s', '-n', '-B', '-C', host, 'dmhost', 'MSL_SDK=iphoneos'], capture_output=True, text=True, check=True).stdout
 # The host's own commands first (its per-source compiles and its link), then the per-file compile commands of the libraries it depends on (libvpx, dav1d: their objects go to
 # gen/vpx and gen/dav1d): header paths keep this order, so the host's headers are found first
-lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().startswith('clang')]
-lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/')) for a in t))
+lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().split(' ')[0] in ('clang', 'clang++', 'g++')]
+lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/', 'gen/astcenc/')) for a in t))
 srcs, incs, defs, fws = [], [], [], []
 for toks in lines:
     i = 0
@@ -25,7 +25,7 @@ for toks in lines:
             d = os.path.normpath(os.path.join(host, t[2:]))
             if d not in incs: incs.append(d)
         elif t.startswith('-D'): defs.append(t)
-        elif t.endswith(('.c', '.m', '.S')): srcs.append(os.path.normpath(os.path.join(host, t)))
+        elif t.endswith(('.c', '.m', '.S', '.cpp')): srcs.append(os.path.normpath(os.path.join(host, t)))
         i += 1
 assert srcs, 'no source files in the compile command'
 dup = sorted({s for s in srcs if srcs.count(s) > 1})

@@ -13,8 +13,8 @@ if not game: sys.exit('set GAME (or DM_GAME) to a base game title ID')
 env = dict(os.environ, GAME=game)
 subprocess.run(['make', '-s', '-C', host, 'game_profile', 'host_msl', 'MSL_SDK=iphoneos'], check=True, env=env)
 cmd = subprocess.run(['make', '-s', '-n', '-B', '-C', host, 'dmhost', 'MSL_SDK=iphoneos'], capture_output=True, text=True, check=True, env=env).stdout
-lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().startswith('clang')]
-lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/')) for a in t))   # the host's own commands first, as gen_build.py does, so its header paths come before the libraries'
+lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().split(' ')[0] in ('clang', 'clang++', 'g++')]
+lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/', 'gen/astcenc/')) for a in t))   # the host's own commands first, as gen_build.py does, so its header paths come before the libraries'
 srcs, incs, defs = [], [], []
 for toks in lines:
     for t in toks:
@@ -22,7 +22,7 @@ for toks in lines:
             d = os.path.normpath(os.path.join(host, t[2:]))
             if d not in incs: incs.append(d)
         elif t.startswith('-D'): defs.append(t)
-        elif t.endswith(('.c', '.m', '.S')): srcs.append(os.path.normpath(os.path.join(host, t)))
+        elif t.endswith(('.c', '.m', '.S', '.cpp')): srcs.append(os.path.normpath(os.path.join(host, t)))
 assert srcs, 'no source files in the compile commands'
 ios_src = os.path.normpath(f'{ios}/Sources')
 srcs = [s for s in dict.fromkeys(srcs) if not os.path.splitext(s)[0].endswith('_mac') and os.path.dirname(s) != ios_src]
@@ -30,8 +30,10 @@ srcs += sorted(os.path.join(ios_src, f) for f in os.listdir(ios_src) if f.endswi
 dirs = list(dict.fromkeys(os.path.dirname(s) for s in srcs))
 flags = ['-arch', 'arm64', '-miphoneos-version-min=26.0', '-mcpu=apple-a16', '-fobjc-arc', '-O1', '-w'] + defs + [f'-I{d}' for d in incs + dirs]
 def one(s):
-    c = ['xcrun', '-sdk', 'iphoneos', 'clang'] + flags + (['-Dmain=dm_main'] if s == os.path.join(host, 'main.c') else []) + ['-c', s, '-o', '/dev/null']
+    driver = 'clang++' if s.endswith('.cpp') else 'clang'
+    c = ['xcrun', '-sdk', 'iphoneos', driver] + flags + (['-Dmain=dm_main'] if s == os.path.join(host, 'main.c') else []) + ['-c', s, '-o', '/dev/null']
     if s.endswith('.c'): c[4:4] = ['-std=gnu11']
+    elif s.endswith('.cpp'): c[4:4] = ['-std=c++11']
     p = subprocess.run(c, capture_output=True, text=True)
     return s, p.returncode, p.stderr
 bad = 0

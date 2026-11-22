@@ -16,13 +16,14 @@ Block linear is how the Tegra X1 GPU stores textures: the data is not one row af
 | `nvn_deswizzle.h`, `nvn_deswizzle.c` | `nvn_deswizzle()`: deswizzles one level and one layer from block linear to linear; `nvn_swizzle()`: the reverse, used for round trips in unit tests; `nvn_bl_offset()`: the block-linear address of a single point. Pure C |
 | `nvn_deswizzle_gpu.h`, `nvn_deswizzle_gpu.m` | A Metal compute shader version of the same deswizzling algorithm, used by the replay layer when uploading packaged textures; when initialization fails or an unsupported format is encountered, the replay layer falls back to the CPU version |
 | `nvn_bcdec.h`, `nvn_bcdec.c` | `nvn_bc_unpacked()` / `nvn_bc_decode()`: decompress BC textures on the CPU into uncompressed formats; decoding uses `dm/third_party/bcdec` |
+| `nvn_astcenc.h`, `nvn_astcenc.cpp` | `nvn_bc_astc_profile()` / `nvn_astc_encode_rgba8()`: BC→ASTC profile mapping and fast ASTC encode for the no-BC path (`dm/third_party/astcenc`) |
 | `tests/` | Unit tests |
 
 The offsets of each level and layer within the storage, and the block height and block depth actually used by each level, are all taken from `../nvn/nvn_tex.c` (`nvn_tex_layout`, `nvn_tex_level_offset`, `nvn_tex_level_tiles`); this directory only does addressing and moving within a level. Packaged parameters override the automatic block dimensions: [Packaged texture block dimensions and linear storage rows](../../../docs/reference/nvn-objects.md#packaged-texture-block-dimensions-and-linear-storage-rows).
 
 ## BC textures
 
-Whether the GPU reads BC natively is determined by `supportsBCTextureCompression` of `MTLDevice`. On a Mac or any other GPU with BC support, BC textures are created and uploaded as BC; there is no decompression path. On no-BC devices (this fork targets A16-class iPhones and similar), BC textures are created in their uncompressed Metal formats and decompressed at upload: BC1–5 on the GPU (the `bcd` kernel in `../nvn/nvn_mtl.m`), BC6H, BC7 and 3D textures on the CPU through `nvn_bcdec.c` in this directory. Decompressed textures take more memory (Breath of the Wild: about 3.9 GB instead of 2.8 GB).
+Whether the GPU reads BC natively is determined by `supportsBCTextureCompression` of `MTLDevice`. On a Mac or any other GPU with BC support, BC textures are created and uploaded as BC; there is no decompression path. On no-BC devices (this fork targets A16-class iPhones and similar), BC textures are transcoded to ASTC at upload through `nvn_astcenc.cpp` (ARM astcenc, block size by format: BC1/BC1 sRGB use 6×6, most others 4×4; BC6H stays RGBA16F uncompressed). Set `DM_NVN_BC_RGBA=1` to force the older unpacked RGBA path (GPU `bcd` for BC1–5, CPU `nvn_bcdec.c` for BC6H/BC7/3D). ASTC host textures use less memory than full RGBA unpack (Breath of the Wild was about 3.9 GB RGBA vs 2.8 GB native BC on a 6 GB phone).
 
 A BC texture is never a render target and its raw blocks are not sampled through an uncompressed view (Metal has no such views; Breath of the Wild encodes one 32×32 BC4 texture on the GPU, GitHub issue #4).
 
