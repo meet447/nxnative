@@ -33,7 +33,7 @@ Off, the default, keeps the 3D picture at full size. On lets the game lower its 
 
 ### Render scale
 
-The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+The size of the 3D picture, from 50 to 100 %. On the iPhone the launcher defaults to **75 %**; on the Mac it defaults to **100 %**. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
@@ -43,7 +43,7 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
 
 ### Upscaling
 
-A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
+A game that renders below the screen's resolution is scaled up to the screen. On the iPhone the launcher defaults to **MetalFX**, which sharpens edges and text as it scales; **Standard** scales smoothly (the Mac default).
 
 ```mermaid
 flowchart LR

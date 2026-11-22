@@ -223,7 +223,7 @@ class Nvn(Base):
         self.assertTrue(want(g('on'), 'none', False, {})); self.assertFalse(want(g('on'), 'none', False, {'IOS_PULL': '0'})); self.assertTrue(want(g(), 'none', False, {'IOS_PULL': '1'}))
         self.assertTrue(want(g(pairs=True), 'g18p', False, {}))   # the archive is made of them
         self.assertTrue(want(g(), 'g18p', False, {}))   # no offline archive: runtime lists can still need pulling entries
-        self.assertEqual(nsp.ios_gpus('', g()), 'none'); self.assertEqual(nsp.ios_gpus('', g('on')), 'g18p'); self.assertEqual(nsp.ios_gpus('', g('on', gpu='g18p g17p')), 'g18p,g17p'); self.assertEqual(nsp.ios_gpus('g16p', g()), 'g16p')
+        self.assertEqual(nsp.ios_gpus('', g()), 'none'); self.assertEqual(nsp.ios_gpus('', g('on')), 'none'); self.assertEqual(nsp.ios_gpus('', g('on', gpu='g18p g17p')), 'g18p,g17p'); self.assertEqual(nsp.ios_gpus('g16p', g()), 'g16p')
 
     def test_old_chain_images_go_too(self):
         self.build(True)

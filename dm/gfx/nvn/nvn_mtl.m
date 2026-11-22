@@ -924,7 +924,7 @@ static void mtl_init_once(void) {
         MLOG("[RED] Metal device %s has no Metal 4 (%s%s%s): the classic part only, nothing is presented (enough for a run-time shader capture)", g_dev.name.UTF8String, no4, *why ? ": " : "", why);
         return;
     }
-    // Without native BC, textures are built decompressed and uploaded through the no-BC path (no_bc, nvn_bcdec.c, GPU bcd for BC1–5)
+    // Without native BC, textures are transcoded to ASTC at upload (no_bc, nvn_astcenc); DM_NVN_BC_RGBA=1 uses unpacked RGBA (nvn_bcdec.c, GPU bcd for BC1–5)
     if (!g_dev.supportsBCTextureCompression || (getenv("DM_TEST_NO_BC") && *getenv("DM_TEST_NO_BC") && strcmp(getenv("DM_TEST_NO_BC"), "0"))) (void)no_bc();
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
@@ -3157,7 +3157,7 @@ static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
 static int dirtycheck(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_DIRTYCHECK") != NULL; return v; }
 static uint64_t full_hash(const uint8_t *m, uint64_t n) { uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull; return h; }
-// The GPU does not support BC compressed formats (A15 / A16 etc.): BC textures are created in the decompressed format and decompressed on the CPU at upload / buffer→texture copy time (nvn_bcdec.c).
+// The GPU does not support BC compressed formats (A15 / A16 etc.): BC textures are transcoded to ASTC at upload (nvn_astcenc.c); DM_NVN_BC_RGBA=1 keeps the uncompressed RGBA path (nvn_bcdec.c).
 // (d2r-mobile converted most of its textures to ASTC offline with a supplementary pack; that tool is not part of this repository, so here every BC texture takes this path). DM_TEST_NO_BC forces this path on any machine
 static int no_bc(void) {
     static int v = -1;
@@ -3637,7 +3637,7 @@ static id<MTLComputePipelineState> bcd_pso(void) {
         NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_bcd_msl) options:nil error:&e]; id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"bcd"] : nil;
         ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!ps) { failed = 1; MLOG("[RED] no BC: GPU decompress pipeline failed %s (falling back to CPU decompression)", e.localizedDescription.UTF8String); }
-        else MLOG("no BC: BC1–5 decompressed on the GPU");
+        else MLOG("no BC (DM_NVN_BC_RGBA): BC1–5 RGBA unpack on the GPU");
     }
     return ps;
 }
@@ -6360,57 +6360,99 @@ static int shrt_block(MTLPixelFormat f, int *side) {   // bytes per block of a t
     *side = 1; return f == MTLPixelFormatDepth16Unorm ? 2 : f == MTLPixelFormatDepth32Float ? 4 : 0;
 }
 static int mtl_fmt_depth(MTLPixelFormat f) { return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float || f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatX32_Stencil8 || f == MTLPixelFormatStencil8; }
-// The shadow's format: the view's, when the base is BC (or a depth format, above) and the view is an uncompressed colour format with one block's bytes per pixel
-static int bcrt_view(id<MTLTexture> base, const view_t *v, int has_v, MTLPixelFormat *pf_out) {
+static int mtl_fmt_astc(MTLPixelFormat f) { return (f >= MTLPixelFormatASTC_4x4_sRGB && f <= MTLPixelFormatASTC_12x12_HDR) || (f >= MTLPixelFormatASTC_4x4_LDR && f <= MTLPixelFormatASTC_12x12_LDR); }
+// The shadow's format: the view's, when the base is BC (native or ASTC host), or a depth format, and the view is an uncompressed colour format with one block's bytes per pixel
+static int bcrt_view_for(id<MTLTexture> base, const view_t *v, int has_v, uint32_t nvn_fmt, MTLPixelFormat *pf_out) {
     uint32_t pf = 0; uint8_t swz[4]; int bw = 0, bh = 0, side = 0, bb = base ? shrt_block(base.pixelFormat, &side) : 0;
+    if (!bb && base && mtl_fmt_astc(base.pixelFormat) && nvn_fmt_bc(nvn_fmt)) { int bx = 0, by = 0; bb = nvn_fmt_bpb(nvn_fmt, &bx, &by); (void)by; side = bx; }
     if (!bb || !has_v || !v->set_format || !nvn_fmt_to_mtl(v->format, &pf, swz) || !pf || mtl_fmt_block((MTLPixelFormat)pf) || mtl_fmt_depth((MTLPixelFormat)pf)) return 0;
     if (nvn_fmt_bpb(v->format, &bw, &bh) != bb || bw != 1 || bh != 1) return 0;
     *pf_out = (MTLPixelFormat)pf; return 1;
 }
+static int bcrt_view(id<MTLTexture> base, const view_t *v, int has_v, MTLPixelFormat *pf_out) { return bcrt_view_for(base, v, has_v, 0, pf_out); }
 // Drawing into a BC texture: the pass draws into an uncompressed shadow of blocks x blocks in the view's format. The level / layer / depth plane's blocks are copied into it through a buffer before the pass
 // and back, byte for byte, after it (bcrt_flush, from rp_end). The shadow is an attachment of its own: always loaded and stored, and kept out of the store-elision bookkeeping,
 // which keys by the BC texture's serial. Shadows and staging buffers stay resident and are reused per attachment number, format and size, so a pass per depth plane adds no residency churn.
 // From PR #11 (digitalhivehub), where Tears of the Kingdom first drew this way
-typedef struct { id<MTLTexture> base, shadow; id<MTLBuffer> buf; NSUInteger level, slice, z, w, h, bw, bh, bpb; } bcrt_t;
+typedef struct { id<MTLTexture> base, shadow; id<MTLBuffer> buf; NSUInteger level, slice, z, w, h, bw, bh, bpb; uint32_t nvn_fmt; int astc; } bcrt_t;
 static bcrt_t g_bcrt[8];
 static __strong id<MTLTexture> g_bcrt_sh[8]; static __strong id<MTLBuffer> g_bcrt_buf[8];
+static int g_bcrt_astc[8];
 static int bcrt_is(id<MTLTexture> t) { for (int i = 0; i < g_nbcrt; i++) if (t && g_bcrt[i].shadow == t) return 1; return 0; }
+static void bcrt_flush_astc_one(bcrt_t *e) {
+    nvn_astc_profile prof;
+    if (!e->astc || !bc_astc_host(e->nvn_fmt, &prof)) return;
+    NSUInteger row = e->bw * e->bpb;
+    const uint8_t *bcsrc = (const uint8_t *)e->buf.contents;
+    if (!bcsrc) { RED_ONCE(155, "ASTC bcrt flush: staging buffer not readable on CPU"); return; }
+    uint32_t w = (uint32_t)e->w, h = (uint32_t)e->h;
+    int ch = (e->nvn_fmt == 0x49 || e->nvn_fmt == 0x4a) ? 1 : (e->nvn_fmt == 0x4b || e->nvn_fmt == 0x4c) ? 2 : 4;
+    size_t raw_pitch = (size_t)w * (size_t)ch, rgba_pitch = (size_t)w * 4;
+    size_t apitch = bc_astc_pitch(&prof, w), arows = (h + (uint32_t)prof.block_h - 1) / (uint32_t)prof.block_h, ablock = apitch * arows;
+    uint8_t *raw = malloc(raw_pitch * h), *rgba = malloc(rgba_pitch * h);
+    if (!raw || !rgba || nvn_bc_decode(e->nvn_fmt, bcsrc, row, w, h, raw, raw_pitch)) { free(raw); free(rgba); return; }
+    bc_to_rgba8(e->nvn_fmt, w, h, raw, raw_pitch, rgba, rgba_pitch);
+    free(raw);
+    id<MTLBuffer> tb = [g_dev newBufferWithLength:ablock ?: 16 options:MTLResourceStorageModeShared];
+    if (!tb || nvn_astc_encode_rgba8(&prof, rgba, rgba_pitch, w, h, (uint8_t *)tb.contents, apitch)) { free(rgba); defer_obj_release(tb); return; }
+    free(rgba);
+    res_add(tb);
+    enc_b_copy_buffer_texture(blit(), tb, 0, apitch, ablock, MTLSizeMake(w, h, 1), e->base, e->slice, e->level, MTLOriginMake(0, 0, e->z));
+    defer_obj_release(tb);
+}
 static void bcrt_flush(void) {
-    int n = g_nbcrt; g_nbcrt = 0;
-    for (int i = 0; i < n; i++) { bcrt_t e = g_bcrt[i]; g_bcrt[i] = (bcrt_t){0};
+    int n = g_nbcrt;
+    bcrt_t work[8];
+    memcpy(work, g_bcrt, (size_t)n * sizeof *work);
+    g_nbcrt = 0;
+    memset(g_bcrt, 0, sizeof g_bcrt);
+    int astc_n = 0;
+    for (int i = 0; i < n; i++) {
+        bcrt_t e = work[i];
         NSUInteger row = e.bw * e.bpb, img = row * e.bh;
         enc_b_copy_texture_buffer(blit(), e.shadow, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(e.bw, e.bh, 1), e.buf, 0, row, img);
-        enc_b_copy_buffer_texture(blit(), e.buf, 0, row, img, MTLSizeMake(e.w, e.h, 1), e.base, e.slice, e.level, MTLOriginMake(0, 0, e.z));
+        if (e.astc) astc_n++;
+        else enc_b_copy_buffer_texture(blit(), e.buf, 0, row, img, MTLSizeMake(e.w, e.h, 1), e.base, e.slice, e.level, MTLOriginMake(0, 0, e.z));
     }
+    if (!astc_n) return;
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    mtl_finish_gpu_at(WS_READTEX);
+    for (int i = 0; i < n; i++) if (work[i].astc) bcrt_flush_astc_one(&work[i]);
 }
 // a holds the BC texture with its level and layer / plane already set; returns 1 when a now holds the shadow
-static int bcrt_attach(MTLRenderPassAttachmentDescriptor *a, id<MTLTexture> base, const view_t *v, int has_v) {
-    MTLPixelFormat spf; int k = g_nbcrt; if (k >= 8 || !bcrt_view(base, v, has_v, &spf)) return 0;
-    int is3d = base.textureType == MTLTextureType3D, side = 1;
-    NSUInteger bpb = (NSUInteger)shrt_block(base.pixelFormat, &side);
+static int bcrt_attach(MTLRenderPassAttachmentDescriptor *a, id<MTLTexture> base, const view_t *v, int has_v, uint32_t nvn_fmt) {
+    MTLPixelFormat spf; int k = g_nbcrt; if (k >= 8 || !bcrt_view_for(base, v, has_v, nvn_fmt, &spf)) return 0;
+    int astc = base && mtl_fmt_astc(base.pixelFormat), is3d = base.textureType == MTLTextureType3D, side = 4;
+    NSUInteger bpb;
+    if (astc) { int bw, bh; bpb = (NSUInteger)nvn_fmt_bpb(nvn_fmt, &bw, &bh); side = (NSUInteger)bw; }
+    else bpb = (NSUInteger)shrt_block(base.pixelFormat, &side);
     NSUInteger lv = a.level, sl = is3d ? 0 : a.slice, z = is3d ? a.depthPlane : 0, w = mip_extent(base.width, lv), h = mip_extent(base.height, lv), bw = (w + side - 1) / side, bh = (h + side - 1) / side;
     NSUInteger row = bw * bpb, img = row * bh;
-    if (!g_bcrt_sh[k] || g_bcrt_sh[k].pixelFormat != spf || g_bcrt_sh[k].width != bw || g_bcrt_sh[k].height != bh) {
+    int astc_buf = astc || g_bcrt_astc[k];
+    if (!g_bcrt_sh[k] || g_bcrt_sh[k].pixelFormat != spf || g_bcrt_sh[k].width != bw || g_bcrt_sh[k].height != bh || astc_buf != g_bcrt_astc[k]) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:spf width:bw height:bh mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
-        id<MTLTexture> sh = [g_dev newTextureWithDescriptor:d]; id<MTLBuffer> buf = [g_dev newBufferWithLength:img options:MTLResourceStorageModePrivate];
+        id<MTLTexture> sh = [g_dev newTextureWithDescriptor:d];
+        id<MTLBuffer> buf = [g_dev newBufferWithLength:img options:astc_buf ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
         if (!sh || !buf) { RED_ONCE(74, "render target in a compressed or depth texture: cannot create its %lux%lu-block shadow (Metal format %lu)", (unsigned long)bw, (unsigned long)bh, (unsigned long)spf); return 0; }
         if (g_bcrt_sh[k]) { defer_obj_release(g_bcrt_sh[k]); defer_obj_release(g_bcrt_buf[k]); }
-        res_add(sh); res_add(buf); g_bcrt_sh[k] = sh; g_bcrt_buf[k] = buf;
+        res_add(sh); res_add(buf); g_bcrt_sh[k] = sh; g_bcrt_buf[k] = buf; g_bcrt_astc[k] = astc_buf;
     }
     id<MTLTexture> sh = g_bcrt_sh[k]; id<MTLBuffer> buf = g_bcrt_buf[k];
-    enc_b_copy_texture_buffer(blit(), base, sl, lv, MTLOriginMake(0, 0, z), MTLSizeMake(w, h, 1), buf, 0, row, img);
-    enc_b_copy_buffer_texture(blit(), buf, 0, row, img, MTLSizeMake(bw, bh, 1), sh, 0, 0, MTLOriginMake(0, 0, 0));
-    g_bcrt[g_nbcrt++] = (bcrt_t){base, sh, buf, lv, sl, z, w, h, bw, bh, bpb};
+    if (!astc) {
+        enc_b_copy_texture_buffer(blit(), base, sl, lv, MTLOriginMake(0, 0, z), MTLSizeMake(w, h, 1), buf, 0, row, img);
+        enc_b_copy_buffer_texture(blit(), buf, 0, row, img, MTLSizeMake(bw, bh, 1), sh, 0, 0, MTLOriginMake(0, 0, 0));
+    }
+    g_bcrt[g_nbcrt++] = (bcrt_t){base, sh, buf, lv, sl, z, w, h, bw, bh, bpb, nvn_fmt, astc};
     a.texture = sh; a.level = 0; a.slice = 0; a.depthPlane = 0;
-    static int once[2]; if (!once[side == 1]++) MLOG("render target in a %s texture: view format %#x drawn into a %lux%lu-block shadow (Metal format %lu) and copied back after the pass (first case pass %llu)",
-                                       side == 1 ? "depth" : "compressed", v->format, (unsigned long)bw, (unsigned long)bh, (unsigned long)spf, g_stat_pass + 1);
+    static int once[3]; if (!once[astc ? 2 : side == 1 ? 1 : 0]++) MLOG("render target in a %s texture: view format %#x drawn into a %lux%lu-block shadow (Metal format %lu) and copied back after the pass (first case pass %llu)",
+                                       astc ? "ASTC BC" : side == 1 ? "depth" : "compressed", v->format, (unsigned long)bw, (unsigned long)bh, (unsigned long)spf, g_stat_pass + 1);
     return 1;
 }
-static MTLPixelFormat rt_view_fmt(id<MTLTexture> base, const view_t *v, int has_v) {
+static MTLPixelFormat rt_view_fmt(id<MTLTexture> base, const view_t *v, int has_v, uint32_t nvn_fmt) {
     MTLPixelFormat spf;
-    if (bcrt_view(base, v, has_v, &spf)) return spf;
-    if (base && mtl_fmt_block(base.pixelFormat)) {
+    if (bcrt_view_for(base, v, has_v, nvn_fmt, &spf)) return spf;
+    if (base && (mtl_fmt_block(base.pixelFormat) || (nvn_fmt_bc(nvn_fmt) && mtl_fmt_astc(base.pixelFormat)))) {
         RED_ONCE(78, "render target is a compressed-format texture (Metal format %lu %lux%lu layers %lu, view format change %d → NVN %#x): not attached; draws to this attachment are lost", (unsigned long)base.pixelFormat, (unsigned long)base.width, (unsigned long)base.height,
                  (unsigned long)base.arrayLength, has_v ? v->set_format : 0, has_v ? v->format : 0);
         return MTLPixelFormatInvalid;
@@ -6489,7 +6531,7 @@ static void rt_view_upgrade_all(int clear_only) {
 static MTLPixelFormat rt_view_fmt_predict(const tex_t *t, id<MTLTexture> base, const view_t *v, int has_v) {
     MTLPixelFormat want;
     if (has_v && rtv_upgradable(t, base, v, &want)) return want;
-    return rt_view_fmt(base, v, has_v);
+    return rt_view_fmt(base, v, has_v, t->d.format);
 }
 static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const view_t *v, int has_v) {
     id<MTLTexture> base = tex_mtl_replay(t); sparse_gpu_wrote(t); tu_wrote(base); bcp_wrote(t, base);
@@ -6497,20 +6539,19 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
     // stops at such an attachment; without it Tears of the Kingdom drew its terrain normal maps into textures made for reading only
     if (base && !(base.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(base.pixelFormat) && base.sampleCount == 1) base = tex_upgrade(t, base, MTLTextureUsageRenderTarget, base.pixelFormat);
     a.texture = base;
-    if (base && mtl_fmt_block(base.pixelFormat)) { if (!bcrt_attach(a, base, v, has_v)) { rt_view_fmt(base, v, has_v); a.texture = nil; } return; }   // compressed formats: a shadow or nothing (see rt_view_fmt)
+    if (base && mtl_fmt_block(base.pixelFormat)) { if (!bcrt_attach(a, base, v, has_v, t->d.format)) { rt_view_fmt(base, v, has_v, t->d.format); a.texture = nil; } return; }   // compressed formats: a shadow or nothing (see rt_view_fmt)
     if (base && nvn_fmt_bc(t->d.format)) {
-        RED_ONCE(78, "render target is a compressed-format texture (no BC, stored decompressed: Metal format %lu %lux%lu, view changes format %d → NVN %#x): not attached, drawing to this attachment is dropped",
-                 (unsigned long)base.pixelFormat, (unsigned long)base.width, (unsigned long)base.height, has_v ? v->set_format : 0, has_v ? v->format : 0);
-        a.texture = nil; return;
+        if (bcrt_attach(a, base, v, has_v, t->d.format)) return;
+        rt_view_fmt(base, v, has_v, t->d.format); a.texture = nil; return;
     }
     if (has_v && v->set_levels) a.level = v->base_level;
     if (has_v && v->set_layers) { if (t->d.target == 2) a.depthPlane = v->min_layer; else a.slice = v->min_layer; }
-    if (base && mtl_fmt_depth(base.pixelFormat) && bcrt_attach(a, base, v, has_v)) return;   // a depth texture through a colour view: a shadow (see shrt_block)
+    if (base && mtl_fmt_depth(base.pixelFormat) && bcrt_attach(a, base, v, has_v, t->d.format)) return;   // a depth texture through a colour view: a shadow (see shrt_block)
     // A view that changes the format is attached as a Metal view of that format (pipeline formats follow the attachment). SMBW's last pass writes the RGBA8 swapchain texture through an RGBA8_SRGB view, so the hardware encodes sRGB on write;
     // attaching the base texture instead stored the linear values as they were and the whole picture came out dark (every value decoded from sRGB once more, on the Mac and the iPhone). The view lives until this submission completes
     if (base && has_v && v->set_format) {
         base = rt_view_upgrade(t, base, v); a.texture = base;
-        MTLPixelFormat pf = rt_view_fmt(base, v, has_v);
+        MTLPixelFormat pf = rt_view_fmt(base, v, has_v, t->d.format);
         if (pf != base.pixelFormat) {
             id<MTLTexture> vw = [base newTextureViewWithPixelFormat:pf];
             if (vw) { a.texture = vw; defer_obj_unref(vw); }

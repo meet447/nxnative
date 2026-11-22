@@ -1,0 +1,503 @@
+# Unsigned IPA for iPhone 15 (A16) — A16/ASTC fork: BC textures transcoded at upload; no bundled pipeline archive by default.
+# Single-pass build_ipa_from_nsp.py only — community workflows that run nxnative_ci_guard.py twice (RomFS handoff) are not used here; those patches are not in this tree.
+#
+# Game input: pass game_url (or set the Game_URL secret). The run downloads that URL, extracts zip/rar/7z/tar when needed,
+# and finds .nsp / .xci / .nsz / .xcz automatically (including nested archives).
+
+name: NxNative - iPhone 15 IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_url:
+        description: Download URL for the base game (HTTP(S) or Google Drive file/folder link or file ID). Zip/rar/7z/tar or a direct NSP/XCI; the NSP is found automatically. Overrides the Game_URL secret.
+        required: false
+        type: string
+        default: ""
+      update_url:
+        description: Optional download URL for an update package (same formats as game_url). Overrides the Update_URL secret.
+        required: false
+        type: string
+        default: ""
+      dlc_url:
+        description: Optional download URL for DLC (same formats as game_url). Overrides the DLC_URL secret.
+        required: false
+        type: string
+        default: ""
+      keys_url:
+        description: Optional download URL for prod.keys (HTTP(S) or Google Drive). Overrides the Keys_URL secret.
+        required: false
+        type: string
+        default: ""
+      profile_id:
+        description: Optional profile ID override (16 hex digits; blank = detect from the base NSP)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout nxnative
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 27.2 and free disk
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR" || { echo "::error::Xcode 27.2 not found"; ls /Applications | grep -i xcode || true; exit 1; }
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          df -h /
+          rm -rf ~/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
+          sudo rm -rf "$HOME/Library/Android" /usr/local/share/dotnet "$HOME/.dotnet" 2>/dev/null || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install build dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          set -euo pipefail
+          brew install glslang xcodegen zstd spirv-cross unar
+          python -m pip install --upgrade pip
+          python -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd gdown
+          python -c "import lz4.block, capstone, fontTools, zbic, gdown; print('python modules OK')"
+
+      - name: Metal toolchain and prerequisite checks
+        run: |
+          set -euo pipefail
+          xcodebuild -downloadComponent MetalToolchain
+          python3 dm/gfx/tools/own_compilers.py --check-metal
+          for t in xcodebuild xcodegen zstd make glslangValidator unar; do
+            command -v "$t" >/dev/null || { echo "::error::missing: $t"; exit 1; }
+          done
+          dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate --source-sha
+          python -c "import compression.zstd" 2>/dev/null || python -c "import backports.zstd"
+
+      - name: Download game files and keys
+        env:
+          GAME_URL: ${{ inputs.game_url || secrets.Game_URL }}
+          UPDATE_URL: ${{ inputs.update_url || secrets.Update_URL }}
+          DLC_URL: ${{ inputs.dlc_url || secrets.DLC_URL }}
+          KEYS_URL: ${{ inputs.keys_url || secrets.Keys_URL }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/nxnative"
+          mkdir -p "$WORK"
+
+          # Download any HTTP(S) URL, or a Google Drive file/folder link / bare file ID (gdown).
+          download_file() {
+            local url="$1"
+            local output="$2"
+            local kind="$3"
+
+            if [[ -z "${url:-}" ]]; then
+              echo "::error::A required download URL is empty ($kind)."
+              exit 1
+            fi
+
+            echo "Downloading $kind..."
+
+            python - "$url" "$output" <<'PY'
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.parse import urlparse, parse_qs
+
+          url = sys.argv[1].strip()
+          output = Path(sys.argv[2])
+          parsed = urlparse(url)
+          host = (parsed.netloc or "").lower()
+          query = parse_qs(parsed.query)
+          file_id = None
+          folder_id = None
+
+          if host in ("drive.google.com", "www.drive.google.com", "docs.google.com"):
+              m = re.search(r"/file/d/([^/]+)", parsed.path)
+              if m:
+                  file_id = m.group(1)
+              m = re.search(r"/folders/([^/?#]+)", parsed.path)
+              if m:
+                  folder_id = m.group(1)
+              if not file_id and query.get("id"):
+                  file_id = query["id"][0]
+              if "usp" in query and not file_id and not folder_id and query.get("id"):
+                  file_id = query["id"][0]
+
+          if not file_id and not folder_id and re.fullmatch(r"[-A-Za-z0-9_]{20,}", url):
+              file_id = url
+
+          if folder_id:
+              print(f"Google Drive folder id={folder_id[:6]}… → gdown --folder", flush=True)
+              # gdown writes into a directory; download into a sibling then flatten one level if needed
+              dest_dir = output.parent / (output.name + ".gdir")
+              dest_dir.mkdir(parents=True, exist_ok=True)
+              cmd = ["gdown", "--folder", "--remaining-ok", f"https://drive.google.com/drive/folders/{folder_id}", "-O", str(dest_dir)]
+              r = subprocess.run(cmd)
+              if r.returncode != 0:
+                  raise SystemExit(f"gdown folder download failed (exit {r.returncode})")
+              files = [p for p in dest_dir.rglob("*") if p.is_file()]
+              if not files:
+                  raise SystemExit("Google Drive folder download produced no files")
+              # Pack the folder tree into a zip so the stage step can extract/find NSP the same way
+              import zipfile
+              with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as zf:
+                  for p in files:
+                      zf.write(p, arcname=str(p.relative_to(dest_dir)))
+              print(f"Packed {len(files)} file(s) from Drive folder into {output.name}", flush=True)
+          elif file_id:
+              print(f"Google Drive file id={file_id[:6]}… → gdown", flush=True)
+              r = subprocess.run(["gdown", "--fuzzy", f"https://drive.google.com/uc?id={file_id}", "-O", str(output)])
+              if r.returncode != 0:
+                  # retry with bare id (older gdown)
+                  r = subprocess.run(["gdown", file_id, "-O", str(output)])
+              if r.returncode != 0:
+                  raise SystemExit(f"gdown failed (exit {r.returncode})")
+          elif parsed.scheme in ("http", "https"):
+              print(f"HTTP(S) → curl -L {parsed.scheme}://{host}{parsed.path[:48]}…", flush=True)
+              r = subprocess.run([
+                  "curl", "-L", "--fail", "--retry", "3", "--retry-delay", "2",
+                  "--connect-timeout", "30", "-o", str(output), url,
+              ])
+              if r.returncode != 0:
+                  raise SystemExit(f"curl download failed (exit {r.returncode})")
+          else:
+              raise SystemExit(
+                  "Unsupported download URL. Use an http(s) link, a Google Drive file/folder link, or a Drive file ID."
+              )
+
+          if not output.is_file() or output.stat().st_size == 0:
+              raise SystemExit(f"Downloaded file is missing or empty: {output}")
+          print(f"Downloaded {output.name}: {output.stat().st_size:,} bytes", flush=True)
+          PY
+          }
+
+          download_file "$KEYS_URL" "$WORK/prod.keys" "keys"
+          if head -c 200 "$WORK/prod.keys" | grep -qi '<html'; then
+            echo "::error::Keys download is HTML, not prod.keys."
+            exit 1
+          fi
+          grep -q '^master_key_00' "$WORK/prod.keys" || { echo "::error::prod.keys has no master_key_00 line."; exit 1; }
+
+          if [[ -z "${GAME_URL:-}" ]]; then
+            echo "::error::No game URL. Pass game_url in the workflow dispatch form, or set the Game_URL secret."
+            exit 1
+          fi
+          download_file "$GAME_URL" "$WORK/game.download" "game"
+
+          if [[ -n "${UPDATE_URL:-}" ]]; then
+            download_file "$UPDATE_URL" "$WORK/update.download" "update"
+          else
+            echo "No update URL; skipping update."
+          fi
+
+          if [[ -n "${DLC_URL:-}" ]]; then
+            download_file "$DLC_URL" "$WORK/dlc.download" "dlc"
+          else
+            echo "No DLC URL; skipping DLC."
+          fi
+
+          chmod 600 "$WORK/prod.keys"
+
+      - name: Stage game packages (extract + find NSP)
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/nxnative"
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+          mkdir -p "$GAME_DIR"
+
+          python - "$WORK" "$GAME_DIR" <<'PY'
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          work = Path(sys.argv[1])
+          game_dir = Path(sys.argv[2])
+          package_extensions = {".nsp", ".xci", ".nsz", ".xcz"}
+          rar_signatures = (b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")
+          archive_exts = {".zip", ".rar", ".7z", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".cab", ".iso"}
+
+          def read_sig(path, n=16):
+              with path.open("rb") as f:
+                  return f.read(n)
+
+          def is_package_magic(sig):
+              return sig[:4] in (b"PFS0", b"HEAD")
+
+          def is_archive_magic(sig):
+              if any(sig.startswith(m) for m in rar_signatures):
+                  return True
+              if sig.startswith(b"PK"):  # zip / jar
+                  return True
+              if sig.startswith(b"7z\xbc\xaf'\x1c"):
+                  return True
+              if sig.startswith(b"\x1f\x8b"):  # gzip
+                  return True
+              if sig.startswith(b"BZh"):  # bzip2
+                  return True
+              if sig.startswith(b"\xfd7zXZ"):  # xz
+                  return True
+              if len(sig) >= 262 and sig[257:262] == b"ustar":
+                  return True
+              return False
+
+          def validate_package(path):
+              magic = read_sig(path, 4)
+              suffix = path.suffix.lower()
+              if suffix in (".nsp", ".nsz") and magic != b"PFS0":
+                  raise SystemExit(f"Invalid {suffix} signature: {path.name}")
+              if suffix in (".xci", ".xcz") and magic != b"HEAD":
+                  raise SystemExit(f"Invalid {suffix} signature: {path.name}")
+
+          def add_package(source, label):
+              # Prefer original name; fall back to label+ext on collision
+              target = game_dir / source.name
+              if target.exists():
+                  stem = f"{label}-{source.stem}"
+                  target = game_dir / f"{stem}{source.suffix.lower()}"
+              if target.exists():
+                  raise SystemExit("Duplicate package filename: " + target.name)
+              validate_package(source)
+              shutil.copy2(source, target)
+              print(f"Added {label}: {target.name} ({target.stat().st_size:,} bytes)", flush=True)
+
+          def find_packages(root):
+              return sorted(
+                  p for p in root.rglob("*")
+                  if p.is_file() and p.suffix.lower() in package_extensions
+              )
+
+          def find_archives(root, skip=None):
+              skip = skip or set()
+              out = []
+              for p in root.rglob("*"):
+                  if not p.is_file() or p in skip:
+                      continue
+                  if p.suffix.lower() in archive_exts or is_archive_magic(read_sig(p)):
+                      if not is_package_magic(read_sig(p)):
+                          out.append(p)
+              return sorted(out)
+
+          def extract_with_unar(archive, dest):
+              dest.mkdir(parents=True, exist_ok=True)
+              print(f"Extracting {archive.name} → {dest.name} (unar)", flush=True)
+              subprocess.run(["unar", "-force-overwrite", "-o", str(dest), str(archive)], check=True)
+
+          def collect_from_tree(root, label, depth=0, seen=None):
+              """Find packages under root; if none, extract nested archives and search again."""
+              seen = seen if seen is not None else set()
+              packages = find_packages(root)
+              if packages:
+                  for package in packages:
+                      add_package(package, label)
+                  return len(packages)
+
+              if depth >= 3:
+                  return 0
+
+              added = 0
+              for archive in find_archives(root):
+                  key = (archive.stat().st_size, archive.name)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  nested = root / f"_nested_{depth}_{archive.stem}"
+                  try:
+                      extract_with_unar(archive, nested)
+                  except subprocess.CalledProcessError as e:
+                      print(f"Warning: could not extract {archive.name}: {e}", flush=True)
+                      continue
+                  added += collect_from_tree(nested, label, depth + 1, seen)
+              return added
+
+          def process_download(label):
+              source = work / f"{label}.download"
+              if not source.exists():
+                  print(f"No {label} download; skipping.", flush=True)
+                  return
+              sig = read_sig(source)
+              if is_package_magic(sig):
+                  ext = ".nsp" if sig[:4] == b"PFS0" else ".xci"
+                  # Prefer .nsz/.xcz only when we cannot tell from magic (PFS0 covers both nsp/nsz)
+                  target = game_dir / f"{label}{ext}"
+                  shutil.copy2(source, target)
+                  validate_package(target)
+                  print(f"Added direct package: {target.name} ({target.stat().st_size:,} bytes)", flush=True)
+                  return
+
+              if is_archive_magic(sig) or source.suffix.lower() in archive_exts:
+                  extract_dir = work / f"extracted-{label}"
+                  extract_with_unar(source, extract_dir)
+                  n = collect_from_tree(extract_dir, label)
+                  if n == 0:
+                      raise SystemExit(
+                          f"No .nsp/.xci/.nsz/.xcz found in {label} archive after extract "
+                          f"(and nested archives up to depth 3)."
+                      )
+                  print(f"{label}: staged {n} package(s) from archive", flush=True)
+                  return
+
+              # Last resort: try unar anyway (some hosts strip/alter magic), else fail with a clear hint
+              extract_dir = work / f"extracted-{label}"
+              try:
+                  extract_with_unar(source, extract_dir)
+                  n = collect_from_tree(extract_dir, label)
+                  if n:
+                      print(f"{label}: staged {n} package(s) via unar fallback", flush=True)
+                      return
+              except subprocess.CalledProcessError:
+                  pass
+              raise SystemExit(
+                  f"{label} download is not a Switch package (PFS0/HEAD) or a recognized archive "
+                  f"(zip/rar/7z/tar/gz). First bytes: {sig[:8]!r}"
+              )
+
+          for label in ("game", "update", "dlc"):
+              process_download(label)
+
+          staged = [p for p in game_dir.iterdir() if p.is_file() and p.suffix.lower() in package_extensions]
+          if not staged:
+              raise SystemExit("No game packages prepared.")
+          print("Staged packages:", flush=True)
+          for p in sorted(staged):
+              print(f"  {p.name} ({p.stat().st_size:,} bytes)", flush=True)
+          PY
+
+          test -s "$WORK/prod.keys"
+
+      - name: Detect title ID and verify profile
+        env:
+          PROFILE_OVERRIDE: ${{ inputs.profile_id }}
+        run: |
+          set -euo pipefail
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+
+          DETECTED_ID="$(python - "$GAME_DIR" <<'PY'
+          import re
+          import struct
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          extensions = {".nsp", ".xci", ".nsz", ".xcz"}
+          candidates = set()
+
+          for path in root.iterdir():
+              if not path.is_file() or path.suffix.lower() not in extensions:
+                  continue
+              try:
+                  with path.open("rb") as f:
+                      header = f.read(16)
+                      if len(header) != 16 or header[:4] != b"PFS0":
+                          continue
+                      count, string_size = struct.unpack_from("<II", header, 4)
+                      if count > 100000 or string_size > 100000000:
+                          continue
+                      entries = f.read(count * 0x18)
+                      strings = f.read(string_size)
+                  for i in range(count):
+                      offset = struct.unpack_from("<I", entries, i * 0x18 + 0x10)[0]
+                      end = strings.find(b"\0", offset)
+                      if end < 0:
+                          continue
+                      name = strings[offset:end].decode(errors="replace")
+                      match = re.fullmatch(r"([0-9A-Fa-f]{16})[0-9A-Fa-f]{16}\.tik", name)
+                      if match:
+                          tid = int(match.group(1), 16)
+                          if (tid & 0xFFF) == 0:
+                              candidates.add(f"{tid:016X}")
+                          elif (tid & 0xFFF) == 0x800:
+                              candidates.add(f"{tid & ~0xFFF:016X}")
+              except (OSError, struct.error):
+                  pass
+              match = re.search(r"\[([0-9A-Fa-f]{16})\]", path.name)
+              if match:
+                  tid = int(match.group(1), 16)
+                  if (tid & 0xFFF) == 0:
+                      candidates.add(f"{tid:016X}")
+
+          if len(candidates) != 1:
+              raise SystemExit(f"Could not uniquely identify base title ID: {sorted(candidates)}")
+          print(next(iter(candidates)))
+          PY
+          )"
+
+          PROFILE_ID="${PROFILE_OVERRIDE:-$DETECTED_ID}"
+          PROFILE_ID="$(echo "$PROFILE_ID" | tr '[:lower:]' '[:upper:]')"
+          [[ "$PROFILE_ID" =~ ^[0-9A-F]{16}$ ]] || { echo "::error::Profile ID must be 16 hex digits."; exit 1; }
+          test -d "dm/games/$PROFILE_ID" || { echo "::error::No profile dm/games/$PROFILE_ID"; exit 1; }
+          echo "DM_GAME=$PROFILE_ID" >> "$GITHUB_ENV"
+          echo "Detected $DETECTED_ID; building profile $PROFILE_ID"
+
+      - name: Build unsigned IPA (single pass)
+        env:
+          DM_PSO_GPUS: none
+        run: |
+          set -euo pipefail
+          # No nxnative_ci_guard.py two-pass RomFS handoff: that helper and its profile patches are not in this fork.
+          WORK="$RUNNER_TEMP/nxnative"
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+          OUTPUT="$RUNNER_TEMP/NxNative.ipa"
+          LOG="$RUNNER_TEMP/build.log"
+          mkdir -p logs
+
+          python scripts/build_ipa_from_nsp.py \
+            "$GAME_DIR" \
+            -k "$WORK/prod.keys" \
+            --allow-other-metal \
+            -o "$OUTPUT" 2>&1 | tee "$LOG"
+
+          [[ -s "$OUTPUT" ]] || { echo "::error::IPA build produced no output."; exit 1; }
+          ls -lh "$OUTPUT"
+          cp "$LOG" logs/build.log
+          find "$GAME_DIR" -path '*_build/logs' -type d -exec cp -R {} logs/ \; 2>/dev/null || true
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NxNative-IPA-iPhone15
+          path: ${{ runner.temp }}/NxNative.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NxNative-IPA-iPhone15-Build-Logs
+          path: |
+            logs/
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/GameFiles/*_build/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Clean up downloads and keys
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/nxnative" "$RUNNER_TEMP/GameFiles" "$RUNNER_TEMP/NxNative.ipa"

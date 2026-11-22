@@ -142,16 +142,16 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
   prog_back
   LJ=Gen/dm/p0/launcher.json
 else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
-# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
-# g18p = A19 / A19 Pro; another family's device has its own architecture, applegpu_g19p = the family after the A19 (its archive compiles with the current toolchain); none = no archive), so the device
-# does not build them on its first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
+# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated
+# tokens such as g15p or applegpu_g19p, or none = no archive). On this A16 IPA fork the default is none unless the profile's pso_gpu names architectures or DM_PSO_GPUS / --gpu overrides; when none is bundled the device
+# compiles pipeline bases on first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
 # Only the Metal 4 path reads it, which iOS turns on for a game whose profile sets pso_mtl4 on: the default is what the profile's pso_gpu key names (whitespace-separated architectures, joined for
-# pso_offline.py's --gpu), else g18p, and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
+# pso_offline.py's --gpu), else none (the device builds the bases on its first start unless DM_PSO_GPUS / --gpu names a GPU), and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
 # made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
 PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
-PGK=g18p; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
-if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g18p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults follow pso_mtl4) - taking g18p" ;; esac; fi
+PGK=none; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
+if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g15p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults to none with pso_mtl4 on) - taking none" ;; esac; fi
 if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
@@ -172,7 +172,7 @@ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/sha
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
-else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g18p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
+else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g15p or another GPU builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
 LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
