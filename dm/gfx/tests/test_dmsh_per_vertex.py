@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dmsh_rewrite.py per_vertex: the flat inputs the translator declares for Ampere's LDTRAM (dm_pv<L>_<v> at user(locn<64 + 3L + v>)) become one vertex_value<float4> at user(locn<L>),
-each read that vertex's get(); a shader without them is unchanged, and one that also interpolates attribute L is refused. ios_metal.compile takes MSL 4.0 for such a source only.
-With DMSH_TEST_METAL=1 the result also compiles with the Metal compilers (the Mac's deployment target, and the iPhone's with its MSL 4.0 flag)."""
+each read that vertex's get(); a shader without them is unchanged, and one that also interpolates attribute L is refused. ios_metal.compile uses MSL 4.0 for every iPhone library (min iOS 26).
+With DMSH_TEST_METAL=1 the result also compiles with the Metal compilers (Mac and iPhone)."""
 from pathlib import Path
 import os
 import shutil
@@ -86,7 +86,7 @@ class PerVertex(unittest.TestCase):
         with self.assertRaises(ValueError):
             dmsh_rewrite.per_vertex(SRC.replace('locn71', 'locn75'))
 
-    def test_only_a_vertex_value_source_compiles_as_msl_4(self):
+    def test_every_iphone_library_compiles_as_msl_4(self):
         calls = []
         real_compile, real_run = ios_metal.dmsh_pch.compile, subprocess.run
         try:
@@ -98,14 +98,17 @@ class PerVertex(unittest.TestCase):
                     ios_metal.compile(str(p), str(Path(d) / f'{name}.air'), str(Path(d) / f'{name}.metallib'))
         finally:
             ios_metal.dmsh_pch.compile, subprocess.run = real_compile, real_run
-        self.assertIn(ios_metal.METAL4_FLAG, calls[0])
-        self.assertNotIn(ios_metal.METAL4_FLAG, calls[1])
+        self.assertEqual(len(calls), 2)
+        for metal in calls:
+            self.assertIn(ios_metal.METAL4_FLAG, metal)
+            self.assertIn(ios_metal.IOS_MIN_FLAG, metal)
+        self.assertEqual(ios_metal.IOS_MIN_FLAG, '-mios-version-min=26.0')
 
     @unittest.skipUnless(os.environ.get('DMSH_TEST_METAL') and shutil.which('xcrun'), 'set DMSH_TEST_METAL=1 to compile with the Metal compilers')
     def test_the_result_compiles(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / 'pv.metal'; p.write_text(dmsh_rewrite.per_vertex(SRC))
-            for metal in (dmsh_chain.MAC_METAL, ios_metal.METAL + [ios_metal.METAL4_FLAG]):
+            for metal in (dmsh_chain.MAC_METAL, ios_metal.METAL):
                 r = subprocess.run([*metal, str(p), '-o', str(Path(d) / 'pv.air')], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
 

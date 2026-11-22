@@ -476,7 +476,7 @@ class Stage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for n, src in enumerate(cases):
                 f = Path(d, f's{n}.metal'); f.write_text(src)
-                for sdk, target in (('macosx', 'air64-apple-macos15.0'), ('iphoneos', 'air64-apple-ios18.0')):
+                for sdk, target in (('macosx', 'air64-apple-macos26.6'), ('iphoneos', 'air64-apple-ios26.0')):
                     r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-target', target, '-c', str(f), '-o', str(f.with_suffix('.air'))], capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, f'{sdk} case {n}: {r.stderr[-1500:]}')
 

@@ -11,7 +11,26 @@ GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
 # The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
 MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
+# BC→ASTC on the no-BC path (nvn_mtl.m), same as dm/host/Makefile and dm/gfx/tex/tests/Makefile
+ASTCENC=../../third_party/astcenc
+ASTCENC_SRC=$(sort $(wildcard $(ASTCENC)/*.cpp))
+ASTCENC_OBJ=$(patsubst $(ASTCENC)/%.cpp,astcenc/%.o,$(ASTCENC_SRC))
+ASTCENC_LIB=astcenc/libastcenc.a
+ifeq ($(shell uname -m),arm64)
+ASTCENC_CXX=clang++
+ASTCENC_VEC=-DASTCENC_NEON=1 -DASTCENC_SSE=0 -DASTCENC_AVX=0 -DASTCENC_SVE=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0
+else
+ASTCENC_CXX=g++
+ASTCENC_VEC=-DASTCENC_SSE=20 -DASTCENC_AVX=0 -DASTCENC_NEON=0 -DASTCENC_SVE=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0
+endif
+ASTCENC_CXXFLAGS=-O2 -g -std=c++11 $(ASTCENC_VEC) -I$(ASTCENC)
+astcenc/%.o: $(ASTCENC)/%.cpp Makefile
+	@mkdir -p astcenc
+	$(ASTCENC_CXX) $(ASTCENC_CXXFLAGS) -c $< -o $@
+$(ASTCENC_LIB): $(ASTCENC_OBJ)
+	ar rcs $@ $(ASTCENC_OBJ)
+NVN_ASTC_LINK=../tex/nvn_astcenc.cpp $(ASTCENC_LIB) -lc++
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H)) -I$(ASTCENC)
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) ../../host/hle.h ../../host/registration.h $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
@@ -22,10 +41,10 @@ $(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py host_msl_force
 	$(MAKE) -C ../../host host_msl GAME=$(GAME)
 .PHONY: host_msl_force
 host_msl_force:
-FW=-framework Metal -framework MetalFX -framework Foundation -framework IOKit -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
+FW=-framework Metal -framework MetalFX -framework Foundation -framework IOKit -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers $(NVN_ASTC_LINK)
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
-MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
+MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) $(ASTCENC_LIB)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
 # CPU-only section walks, including every registration producer; ASan needs no prefix ignorelist.
 REGISTRATION_SRC=../gl/hle_gl.m ../../host/hle.c ../../host/hle_table.c ../../host/hle_sf.c ../nvn/nvn_mtl.m $(MTL_T_SRC)

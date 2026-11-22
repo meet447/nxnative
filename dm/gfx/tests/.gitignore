@@ -7,3 +7,5 @@ t_*
 nvn_replay
 .precommit.err
 .precommit_snap/
+# BC→ASTC third-party objects linked into Metal tests (dm/gfx/tests/Makefile)
+astcenc/
