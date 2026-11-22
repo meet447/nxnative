@@ -464,7 +464,8 @@ jobs:
           echo "Detected $DETECTED_ID; building profile $PROFILE_ID"
 
       # Slim IPA: derive a stable public URL before packing so romfs.url is baked in, then upload RomFS.img to that key after the build.
-      - name: Plan slim IPA download URL (S3)
+      # Works with AWS S3 and Lightsail object storage (S3-compatible; needs --endpoint-url https://s3.<region>.amazonaws.com).
+      - name: Plan slim IPA download URL (S3 / Lightsail)
         id: slim
         env:
           SLIM_IPA: ${{ inputs.slim_ipa }}
@@ -472,6 +473,7 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
           S3_PUBLIC_BASE_URL: ${{ secrets.S3_PUBLIC_BASE_URL }}
         run: |
           set -euo pipefail
@@ -483,14 +485,17 @@ jobs:
           if [[ -n "${ROMFS_URL_OVERRIDE:-}" ]]; then
             echo "mode=url" >> "$GITHUB_OUTPUT"
             echo "romfs_url=${ROMFS_URL_OVERRIDE}" >> "$GITHUB_OUTPUT"
-            echo "Slim IPA: using romfs_url override (no S3 upload)"
+            echo "Slim IPA: using romfs_url override (no bucket upload)"
             exit 0
           fi
           if [[ -z "${S3_BUCKET:-}" ]]; then
-            echo "::error::slim_ipa is on but secret S3_BUCKET is empty. Add S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION (and optional S3_PUBLIC_BASE_URL / S3_PREFIX), or pass romfs_url, or turn slim_ipa off."
+            echo "::error::slim_ipa is on but secret S3_BUCKET is empty. For Lightsail/S3 add S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION (optional S3_ENDPOINT / S3_PUBLIC_BASE_URL / S3_PREFIX), or pass romfs_url, or turn slim_ipa off."
             exit 1
           fi
           REGION="${AWS_REGION:-us-east-1}"
+          # Lightsail: https://s3.<region>.amazonaws.com (Access keys from the Lightsail bucket page)
+          ENDPOINT="${S3_ENDPOINT:-https://s3.${REGION}.amazonaws.com}"
+          ENDPOINT="${ENDPOINT%/}"
           PREFIX="${S3_PREFIX:-nxnative}"
           PREFIX="${PREFIX#/}"; PREFIX="${PREFIX%/}"
           KEY="${PREFIX}/${DM_GAME}/romfs.img"
@@ -498,6 +503,7 @@ jobs:
             BASE="${S3_PUBLIC_BASE_URL%/}"
             URL="${BASE}/${KEY}"
           else
+            # Same public object URL Lightsail shows in the console for a public object
             URL="https://${S3_BUCKET}.s3.${REGION}.amazonaws.com/${KEY}"
           fi
           echo "mode=s3" >> "$GITHUB_OUTPUT"
@@ -505,7 +511,8 @@ jobs:
           echo "s3_bucket=${S3_BUCKET}" >> "$GITHUB_OUTPUT"
           echo "s3_key=${KEY}" >> "$GITHUB_OUTPUT"
           echo "aws_region=${REGION}" >> "$GITHUB_OUTPUT"
-          echo "Slim IPA + S3: bake ${URL} into the app, then upload RomFS.img to s3://${S3_BUCKET}/${KEY}"
+          echo "s3_endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "Slim IPA + Lightsail/S3: bake ${URL} into the app, then upload to s3://${S3_BUCKET}/${KEY} via ${ENDPOINT}"
 
       - name: Build unsigned IPA (single pass)
         env:
@@ -546,7 +553,7 @@ jobs:
             echo "ROMFS_IMG=$IMG" >> "$GITHUB_ENV"
           fi
 
-      - name: Upload RomFS.img to S3
+      - name: Upload RomFS.img to Lightsail / S3
         if: success() && steps.slim.outputs.mode == 's3'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -554,23 +561,29 @@ jobs:
           AWS_DEFAULT_REGION: ${{ steps.slim.outputs.aws_region }}
           S3_BUCKET: ${{ steps.slim.outputs.s3_bucket }}
           S3_KEY: ${{ steps.slim.outputs.s3_key }}
+          S3_ENDPOINT: ${{ steps.slim.outputs.s3_endpoint }}
           ROMFS_URL: ${{ steps.slim.outputs.romfs_url }}
         run: |
           set -euo pipefail
           [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || {
-            echo "::error::S3 upload needs secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+            echo "::error::Upload needs secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (Lightsail: bucket → Access keys)."
             exit 1
           }
           [[ -s "${ROMFS_IMG:-}" ]] || { echo "::error::ROMFS_IMG missing after build."; exit 1; }
           if ! command -v aws >/dev/null; then
             pip install --quiet 'awscli>=1.32,<2'
           fi
-          echo "Uploading $(ls -lh "$ROMFS_IMG" | awk '{print $5}') → s3://${S3_BUCKET}/${S3_KEY}"
-          # Bucket policy (or CloudFront) should allow public GetObject on this prefix; ACL is optional and often blocked.
-          aws s3 cp "$ROMFS_IMG" "s3://${S3_BUCKET}/${S3_KEY}" --only-show-errors
+          EP=(--endpoint-url "$S3_ENDPOINT")
+          echo "Uploading $(ls -lh "$ROMFS_IMG" | awk '{print $5}') → s3://${S3_BUCKET}/${S3_KEY} ($S3_ENDPOINT)"
+          # public-read so the phone can GET without signed URLs (Lightsail: bucket must allow public objects).
+          if ! aws s3 cp "$ROMFS_IMG" "s3://${S3_BUCKET}/${S3_KEY}" "${EP[@]}" \
+              --acl public-read --only-show-errors; then
+            echo "::warning::public-read ACL rejected; uploading without ACL (set the object/bucket public in Lightsail)."
+            aws s3 cp "$ROMFS_IMG" "s3://${S3_BUCKET}/${S3_KEY}" "${EP[@]}" --only-show-errors
+          fi
           echo "::notice::RomFS available at ${ROMFS_URL}"
-          aws s3api head-object --bucket "$S3_BUCKET" --key "$S3_KEY" >/dev/null
-          echo "S3 object OK ($(stat -f%z "$ROMFS_IMG") bytes)"
+          aws s3api head-object --bucket "$S3_BUCKET" --key "$S3_KEY" "${EP[@]}" >/dev/null
+          echo "Object OK ($(stat -f%z "$ROMFS_IMG") bytes)"
 
       - name: Upload IPA
         if: success()
