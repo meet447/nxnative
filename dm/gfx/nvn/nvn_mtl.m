@@ -3164,7 +3164,7 @@ static int no_bc(void) {
     if (v < 0) {
         const char *e = getenv("DM_TEST_NO_BC");
         v = (e && *e && strcmp(e, "0")) || !g_dev.supportsBCTextureCompression;
-        if (v) MLOG("GPU has no BC texture formats%s: BC textures are created decompressed (BC1–5 on GPU, BC6H/BC7/3D on CPU)", e && *e && strcmp(e, "0") ? " (DM_TEST_NO_BC)" : "");
+        if (v) MLOG("GPU has no BC texture formats%s: BC textures are transcoded to ASTC (BC6H stays RGBA16F; DM_NVN_BC_RGBA=1 forces RGBA unpack)", e && *e && strcmp(e, "0") ? " (DM_TEST_NO_BC)" : "");
     }
     return v;
 }
@@ -4279,7 +4279,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                     continue;
                 }
                 uint8_t *cb = malloc(pitch * rows * z); size_t up = (size_t)w * ubpp;
-                if (!cb || nvn_deswizzle(&t->d.format, l, y, src, cb, pitch)) { free(cb); RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+                if (!cb || nvn_deswizzle(&t->d, l, y, src, cb, pitch)) { free(cb); RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
                 for (uint32_t zi = 0; zi < z; zi++) nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, (uint8_t *)stg.contents + off + zi * up * h, up);
                 free(cb);
                 up_blit_add(stg, off, up, up * h, MTLSizeMake(w, h, z), mt, y, l);
