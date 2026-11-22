@@ -924,7 +924,7 @@ static void mtl_init_once(void) {
         MLOG("[RED] Metal device %s has no Metal 4 (%s%s%s): the classic part only, nothing is presented (enough for a run-time shader capture)", g_dev.name.UTF8String, no4, *why ? ": " : "", why);
         return;
     }
-    // Without native BC, textures are built decompressed and uploaded through the no-BC path (no_bc, nvn_bcdec.c, GPU bcd for BC1–5)
+    // Without native BC, textures are transcoded to ASTC at upload (no_bc, nvn_astcenc); DM_NVN_BC_RGBA=1 uses unpacked RGBA (nvn_bcdec.c, GPU bcd for BC1–5)
     if (!g_dev.supportsBCTextureCompression || (getenv("DM_TEST_NO_BC") && *getenv("DM_TEST_NO_BC") && strcmp(getenv("DM_TEST_NO_BC"), "0"))) (void)no_bc();
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
@@ -3157,7 +3157,7 @@ static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
 static int dirtycheck(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_DIRTYCHECK") != NULL; return v; }
 static uint64_t full_hash(const uint8_t *m, uint64_t n) { uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ m[i]) * 1099511628211ull; return h; }
-// The GPU does not support BC compressed formats (A15 / A16 etc.): BC textures are created in the decompressed format and decompressed on the CPU at upload / buffer→texture copy time (nvn_bcdec.c).
+// The GPU does not support BC compressed formats (A15 / A16 etc.): BC textures are transcoded to ASTC at upload (nvn_astcenc.c); DM_NVN_BC_RGBA=1 keeps the uncompressed RGBA path (nvn_bcdec.c).
 // (d2r-mobile converted most of its textures to ASTC offline with a supplementary pack; that tool is not part of this repository, so here every BC texture takes this path). DM_TEST_NO_BC forces this path on any machine
 static int no_bc(void) {
     static int v = -1;
@@ -3637,7 +3637,7 @@ static id<MTLComputePipelineState> bcd_pso(void) {
         NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_bcd_msl) options:nil error:&e]; id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"bcd"] : nil;
         ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!ps) { failed = 1; MLOG("[RED] no BC: GPU decompress pipeline failed %s (falling back to CPU decompression)", e.localizedDescription.UTF8String); }
-        else MLOG("no BC: BC1–5 decompressed on the GPU");
+        else MLOG("no BC (DM_NVN_BC_RGBA): BC1–5 RGBA unpack on the GPU");
     }
     return ps;
 }

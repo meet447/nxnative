@@ -142,9 +142,9 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then
   prog_back
   LJ=Gen/dm/p0/launcher.json
 else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
-# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated:
-# g18p = A19 / A19 Pro; another family's device has its own architecture, applegpu_g19p = the family after the A19 (its archive compiles with the current toolchain); none = no archive), so the device
-# does not build them on its first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
+# The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the base of every shader pair and a pipeline per compute shader of the shader map, compiled here by metal-tt for each GPU architecture in DM_PSO_GPUS (comma-separated
+# tokens such as g15p or applegpu_g19p, or none = no archive). On this A16 IPA fork the default is none unless the profile's pso_gpu names architectures or DM_PSO_GPUS / --gpu overrides; when none is bundled the device
+# compiles pipeline bases on first start (Breath of the Wild: 15,767 bases, 7-8 minutes on an iPhone 17 Pro Max).
 # Only the Metal 4 path reads it, which iOS turns on for a game whose profile sets pso_mtl4 on: the default is what the profile's pso_gpu key names (whitespace-separated architectures, joined for
 # pso_offline.py's --gpu), else none (the device builds the bases on its first start unless DM_PSO_GPUS / --gpu names a GPU), and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;

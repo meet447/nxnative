@@ -46,7 +46,11 @@ Community projects build on nxnative with tools to turn your games into apps for
 - **Mac:** Apple silicon (M-series), macOS 26.6 or later. Building games requires Xcode 27.2.
 - **iPhone:** A16 only (iPhone 15 and 15 Plus), iOS 26 or later.
 
-This fork decompresses BC textures on the A16. Heavy games may need the Increased Memory Limit entitlement and can still run out of memory (Breath of the Wild–class titles). Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
+This fork transcodes BC textures to ASTC on the A16. Heavy games may need the Increased Memory Limit entitlement and can still run out of memory (Breath of the Wild–class titles). Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
+
+### A16 testing order
+
+On iPhone 15 hardware, try lighter titles first — [FINAL FANTASY X/X-2 HD Remaster](dm/games/0100BC300CB48000/README.md), [Octopath Traveler 0](dm/games/01005270232F2000/README.md) and [TUNIC](dm/games/0100DA801624E000/README.md) — before [Breath of the Wild](dm/games/01007EF00011E000/README.md), which should wait until the bcrt render-target path lands on this fork.
 
 IPA builds from the packing script default to **no pipeline archive** (`DM_PSO_GPUS=none`): the iPhone compiles pipeline bases on first start. After measuring on A16, rebuild with `--gpu g15p` (or the `applegpu_…` name the device log reports). The iOS launcher defaults to **75% render scale** and **MetalFX** present upscale.
 

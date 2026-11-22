@@ -1,11 +1,48 @@
 #include "nvn_astcenc.h"
 #include "../../third_party/astcenc/astcenc.h"
 #include <cstdlib>
+#include <pthread.h>
 #include <string.h>
 
-enum { RGBA16Float = 115, ASTC_SRGB0 = 186, ASTC_LDR0 = 204 };
+enum { RGBA16Float = 115, ASTC_SRGB0 = 186, ASTC_LDR0 = 204, ASTC_CTX_SLOTS = 8 };
 
 static int pf_srgb(uint32_t pf) { return pf >= ASTC_SRGB0 && pf < ASTC_LDR0; }
+
+struct astc_ctx_slot {
+    int used;
+    unsigned block_w, block_h;
+    int srgb;
+    astcenc_context *ctx;
+};
+
+static astc_ctx_slot g_astc_slots[ASTC_CTX_SLOTS];
+static pthread_mutex_t g_astc_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static astcenc_context *astc_ctx_get(unsigned bw, unsigned bh, int srgb) {
+    astcenc_profile apr = srgb ? ASTCENC_PRF_LDR_SRGB : ASTCENC_PRF_LDR;
+    for (int i = 0; i < ASTC_CTX_SLOTS; i++) {
+        astc_ctx_slot *s = &g_astc_slots[i];
+        if (s->used && s->block_w == bw && s->block_h == bh && s->srgb == srgb) return s->ctx;
+    }
+    astc_ctx_slot *slot = nullptr;
+    for (int i = 0; i < ASTC_CTX_SLOTS; i++) {
+        if (!g_astc_slots[i].used) {
+            slot = &g_astc_slots[i];
+            break;
+        }
+    }
+    if (!slot) return nullptr;
+    astcenc_config config;
+    if (astcenc_config_init(apr, bw, bh, 1, ASTCENC_PRE_FAST, 0, &config) != ASTCENC_SUCCESS) return nullptr;
+    astcenc_context *ctx = nullptr;
+    if (astcenc_context_alloc(&config, 1, &ctx) != ASTCENC_SUCCESS) return nullptr;
+    slot->used = 1;
+    slot->block_w = bw;
+    slot->block_h = bh;
+    slot->srgb = srgb;
+    slot->ctx = ctx;
+    return ctx;
+}
 
 int nvn_bc_astc_profile(uint32_t nvn_fmt, nvn_astc_profile *out) {
     if (!out) return 0;
@@ -48,16 +85,25 @@ int nvn_bc_astc_profile(uint32_t nvn_fmt, nvn_astc_profile *out) {
 int nvn_astc_encode_rgba8(const nvn_astc_profile *prof, const uint8_t *src, size_t src_pitch,
                           uint32_t w, uint32_t h, uint8_t *dst, size_t dst_pitch) {
     if (!prof || !src || !dst || !w || !h) return -1;
-    astcenc_profile apr = pf_srgb(prof->mtl_pf) ? ASTCENC_PRF_LDR_SRGB : ASTCENC_PRF_LDR;
-    astcenc_config config;
-    astcenc_error st = astcenc_config_init(apr, (unsigned)prof->block_w, (unsigned)prof->block_h, 1,
-                                           ASTCENC_PRE_FAST, 0, &config);
-    if (st != ASTCENC_SUCCESS) return -1;
-    astcenc_context *ctx = nullptr;
-    st = astcenc_context_alloc(&config, 1, &ctx);
-    if (st != ASTCENC_SUCCESS) return -1;
-    void *plane = (void *)src;
-    void *slices[1] = { plane };
+    int srgb = pf_srgb(prof->mtl_pf);
+    unsigned bw = (unsigned)prof->block_w, bh = (unsigned)prof->block_h;
+    unsigned bx = (w + bw - 1) / bw;
+    unsigned by = (h + bh - 1) / bh;
+    size_t rowsz = (size_t)bx * 16;
+    size_t need = rowsz * by;
+    if (dst_pitch < rowsz) return -1;
+    (void)src_pitch;
+    uint8_t stack[4096];
+    uint8_t *tight = need <= sizeof stack ? stack : (uint8_t *)malloc(need);
+    if (!tight) return -1;
+    pthread_mutex_lock(&g_astc_mu);
+    astcenc_context *ctx = astc_ctx_get(bw, bh, srgb);
+    if (!ctx) {
+        pthread_mutex_unlock(&g_astc_mu);
+        if (tight != stack) free(tight);
+        return -1;
+    }
+    void *slices[1] = { (void *)src };
     astcenc_image image{};
     image.dim_x = w;
     image.dim_y = h;
@@ -65,23 +111,9 @@ int nvn_astc_encode_rgba8(const nvn_astc_profile *prof, const uint8_t *src, size
     image.data_type = ASTCENC_TYPE_U8;
     image.data = slices;
     astcenc_swizzle swz{ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
-    unsigned bx = (w + (unsigned)prof->block_w - 1) / (unsigned)prof->block_w;
-    unsigned by = (h + (unsigned)prof->block_h - 1) / (unsigned)prof->block_h;
-    size_t rowsz = (size_t)bx * 16;
-    size_t need = rowsz * by;
-    if (dst_pitch < rowsz) {
-        astcenc_context_free(ctx);
-        return -1;
-    }
-    (void)src_pitch;
-    uint8_t stack[4096];
-    uint8_t *tight = need <= sizeof stack ? stack : (uint8_t *)malloc(need);
-    if (!tight) {
-        astcenc_context_free(ctx);
-        return -1;
-    }
-    st = astcenc_compress_image(ctx, &image, &swz, tight, need, 0);
-    astcenc_context_free(ctx);
+    astcenc_error st = astcenc_compress_image(ctx, &image, &swz, tight, need, 0);
+    astcenc_compress_reset(ctx);
+    pthread_mutex_unlock(&g_astc_mu);
     if (st != ASTCENC_SUCCESS) {
         if (tight != stack) free(tight);
         return -1;

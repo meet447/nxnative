@@ -148,6 +148,7 @@ DM_NVN_ARENA_SHARE	switch	`0` gives each submission per-frame arena blocks of it
 DM_NVN_ARENA_TRIM	switch	`0` keeps every per-frame arena block of 32 MB or less for the rest of the run, as before; by default one the GPU is done with goes once no submission has used it for 600 submissions, down to 4 blocks
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
 DM_NVN_BC_ALIAS	diagnostic	Set 0 to send copies to an uncompressed alias instead of its block-compressed storage, for an A/B check; default 1
+DM_NVN_BC_RGBA	diagnostic	`1` uploads BC textures as unpacked RGBA instead of ASTC transcode (GPU `bcd` for BC1–5, CPU `nvn_bcdec.c` for BC6H/BC7/3D); off by default on the no-BC path
 DM_NVN_BF_WANT	path	`=<file>`: appends the key of each fragment shader whose passes could not be merged for lack of a readable-tile version to that file, once per key
 DM_NVN_BLEND_ZERO	switch	`0` leaves a NaN or Inf colour under a zero blend weight to Apple's blender, which stores NaN; by default a pixel shader returns it as 0 where the draw's blend state gives its source colour a zero weight on a floating-point target, as NVIDIA's blender does with the option NVN's driver sets
 DM_NVN_BORDER_KEEP	diagnostic	1 keeps the border corrections in every pipeline, as before the DMSH_BORDER_FC specialization: a wrong border colour with the specialization, or its cost (ab with DM_AB)
@@ -439,6 +440,7 @@ DM_TEST_KEYRACE	diagnostic	`=<n>` creates up to n (at most 512) pthread keys on 
 DM_TEST_KILL_AT	diagnostic	`=write:<n>` exits the process (`_exit(9)`) at the nth save write, imitating a kill mid-write
 DM_TEST_LEAK_GPU	diagnostic	`=1` allocates and keeps a 1 MB shared Metal buffer every 100 ticks: a GPU memory leak on demand
 DM_TEST_LINK_STALL	diagnostic	`=<start s>,<duration s>`: counting from the first present, pauses the display link at that point for that long, to check the present fallback
+DM_TEST_NO_BC	diagnostic	`1` forces the no-BC texture path on any machine (ASTC transcode at upload, BC6H stays RGBA16F), as on an iPhone 15 without native BC
 DM_TEST_NO_METAL4	diagnostic	`=1` treats the GPU as one without Metal 4, as on a virtual Mac: the NVN layer starts only its classic part and drops every present
 DM_TEST_PRESENT_LAG	diagnostic	`=<every n>,<ms>[,<in a row>][;…]` sleeps that long before every nth present (and the ones after it in the run): a slow frame on demand
 DM_TEST_STUCK_DRAW	test	In t_pso_archive's SIGTERM and hand-over cases, holds a draw in the graphics layer (dm_gfx_enter with no leave) so the graceful exit's drain never returns

@@ -1,4 +1,4 @@
-# Unsigned IPA for iPhone 15 (A16) from this fork: BC texture path, no bundled A19 pipeline archive by default.
+# Unsigned IPA for iPhone 15 (A16) — A16/ASTC fork: BC textures transcoded at upload; no bundled pipeline archive by default.
 # Single-pass build_ipa_from_nsp.py only — community workflows that run nxnative_ci_guard.py twice (RomFS handoff) are not used here; those patches are not in this tree.
 
 name: NxNative - iPhone 15 IPA
