@@ -101,10 +101,13 @@ else
 mkdir -p "$APP/msl"
 # DM_COPY_ROMFS=NO: the game files stay out of the app (main.m takes Documents/romfs first, copied there once): a reinstall then sends the code and shaders, not the whole game
 if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
-    rm -rf "$APP/romfs" "$APP/romfs.img" "$APP/romfs.id"
+    rm -rf "$APP/romfs" "$APP/romfs.img" "$APP/romfs.id" "$APP/romfs.url"
     # the image's identity (dm/host/romfs_identity.h): main.m uses only a Documents/romfs.img that matches it; a RomFS folder has none yet (push_romfs.sh packs it), so no identity is written for it
     if [ -f "$DM_RESOURCE_ROMFS" ]; then
         python3 -I "$resource_dm/tools/romfs_image.py" --identity "$DM_RESOURCE_ROMFS" "${DM_RESOURCE_TITLE:-}" "${DM_RESOURCE_VERSION:-}" "${DM_RESOURCE_BUILD:-}" > "$APP/romfs.id" || die "identity of $DM_RESOURCE_ROMFS"
+    fi
+    if [ -n "${DM_ROMFS_URL:-}" ]; then
+        printf '%s\n' "$DM_ROMFS_URL" > "$APP/romfs.url" || die "write romfs.url"
     fi
 else sync_romfs "$DM_RESOURCE_ROMFS" "$APP"; fi
 sync_libraries "$DM_RESOURCE_SHADERS" "$APP/msl" "$DM_RESOURCE_MSLDIR"

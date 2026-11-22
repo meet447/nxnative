@@ -82,6 +82,12 @@ class UnsignedIpaTests(unittest.TestCase):
     def test_slim_ipa_of_a_folder_has_no_identity(self):
         self.assertNotIn('Payload/DmIOS.app/romfs.id', self.pack(DM_COPY_ROMFS='NO'))
 
+    def test_slim_ipa_with_romfs_url_bakes_the_download_address(self):
+        names = self.pack(image=True, DM_COPY_ROMFS='NO', DM_ROMFS_URL='https://example.com/romfs.img')
+        self.assertIn('Payload/DmIOS.app/romfs.url', names)
+        self.assertIn('Payload/DmIOS.app/romfs.id', names)
+        self.assertFalse([n for n in names if n.endswith(('/romfs', '/romfs.img')) or '/romfs/' in n])
+
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_executable_carries_the_entitlements(self):
         cases = [({}, True), ({'DM_ENTITLEMENTS': ''}, False)]

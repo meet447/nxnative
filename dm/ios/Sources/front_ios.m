@@ -22,10 +22,13 @@ void dm_gamepad_active(void);
 
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
+int front_ios_boot_reload(void);   // main.m: after RomfsDownload writes Documents/romfs.img
+NSString *front_ios_romfs_url(void);   // main.m: <App>/romfs.url when the slim IPA offers a VPS download
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 const char *front_ios_device_check(void);   // main.m: why this device cannot run this A16-only fork (NULL = supported iPhone 15 / 15 Plus)
 bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+#import "RomfsDownload.h"
 
 static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
@@ -92,11 +95,16 @@ static void tv_attach(void);
 @property (nonatomic) BOOL partiallyOpen;   // an iPhone Duo's hinge half open (UIHingeInteraction, iOS 27.1)
 @property (nonatomic) NSInteger hingeStatus;
 @property (nonatomic, copy) NSString *layoutLog;   // the last layout line logged
+@property (nonatomic, strong) UILabel *romfsLabel;   // slim IPA: download progress / errors
+@property (nonatomic, strong) UIProgressView *romfsBar;
+@property (nonatomic) BOOL romfsDownloading;
 #if __has_include(<UIKit/UIHingeInteraction.h>)
 - (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
 #endif
 - (void)startGame;
 - (void)showFPS:(BOOL)on;
+- (void)startRomfsDownload;
+- (void)continueAfterRomfs;
 @end
 static DmRootVC *g_root;
 static CGFloat g_picture_aspect = DM_PICTURE_16_9;   // the presented picture's width / height (front_picture_shape); main thread
@@ -108,6 +116,63 @@ static void launcher_done(void) { [g_root startGame]; }
     lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
     lb.text = text; [self.view addSubview:lb];
+}
+- (void)startRomfsDownload {
+    if (self.romfsDownloading) return;
+    self.romfsDownloading = YES;
+    uint64_t need = [RomfsDownload expectedSize];
+    self.romfsLabel.text = need
+        ? [NSString stringWithFormat:@"Downloading game files (%.1f GB)…\nKeep the app open; a partial download resumes next launch.", need / (1024.0 * 1024.0 * 1024.0)]
+        : @"Downloading game files…\nKeep the app open; a partial download resumes next launch.";
+    self.romfsBar.hidden = NO;
+    self.romfsBar.progress = 0;
+    __weak DmRootVC *weakSelf = self;
+    [RomfsDownload startWithProgress:^(double p, int64_t got, int64_t total) {
+        DmRootVC *vc = weakSelf; if (!vc) return;
+        if (p >= 0) vc.romfsBar.progress = (float)MIN(p, 1.0);
+        if (total > 0) {
+            vc.romfsLabel.text = [NSString stringWithFormat:@"Downloading game files…\n%.1f / %.1f GB",
+                                  got / (1024.0 * 1024.0 * 1024.0), total / (1024.0 * 1024.0 * 1024.0)];
+        }
+    } completion:^(NSError *err) {
+        DmRootVC *vc = weakSelf; if (!vc) return;
+        vc.romfsDownloading = NO;
+        if (err) {
+            vc.romfsBar.hidden = YES;
+            vc.romfsLabel.text = [NSString stringWithFormat:@"Download failed.\n%@\nTap the screen to retry.", err.localizedDescription];
+            vc.view.userInteractionEnabled = YES;
+            for (UIGestureRecognizer *g in vc.view.gestureRecognizers.copy)
+                if ([g isKindOfClass:UITapGestureRecognizer.class]) [vc.view removeGestureRecognizer:g];
+            [vc.view addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:vc action:@selector(startRomfsDownload)]];
+            return;
+        }
+        if (!front_ios_boot_reload()) {
+            const char *why = front_ios_boot_message();
+            vc.romfsBar.hidden = YES;
+            vc.romfsLabel.text = why
+                ? [NSString stringWithFormat:@"Download finished, but the game files are still unusable.\n%s", why]
+                : @"Download finished, but the game files are still unusable.";
+            return;
+        }
+        [vc.romfsLabel removeFromSuperview];
+        [vc.romfsBar removeFromSuperview];
+        vc.romfsLabel = nil; vc.romfsBar = nil;
+        [vc continueAfterRomfs];
+    }];
+}
+- (void)continueAfterRomfs {
+    front_ios_audio_watch();
+#if defined(__IPHONE_27_0)
+    if (@available(iOS 27.0, *)) {
+        UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
+        c.delegateClass = NSClassFromString(@"DmTVSceneDelegate");
+        self.tv = [self registerSceneAccessory:[UISceneAccessory externalNonInteractiveSceneAccessoryWithConfiguration:c]];
+    }
+#endif
+    if (self.launched) return;
+    self.launched = YES; g_root = self;
+    if (!dm_show_launcher((__bridge void *)self, launcher_done)) [self startGame];
+    front_ios_notify_ask();
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -122,7 +187,21 @@ static void launcher_done(void) { [g_root startGame]; }
 #endif
     front_ios_power_watch();
     front_ios_notify_setup();
-    if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
+    if (!front_ios_boot_ok()) {   // No game files: VPS download when romfs.url is baked in, else a static hint
+        if (front_ios_romfs_url()) {
+            UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 80)];
+            lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
+            [self.view addSubview:lb]; self.romfsLabel = lb;
+            UIProgressView *bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+            bar.frame = CGRectMake(40, CGRectGetMidY(self.view.bounds) + 60, self.view.bounds.size.width - 80, 4);
+            bar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+            bar.progressTintColor = UIColor.whiteColor;
+            bar.trackTintColor = [UIColor colorWithWhite:0.3 alpha:1];
+            [self.view addSubview:bar]; self.romfsBar = bar;
+            [self startRomfsDownload];
+            return;
+        }
         const char *why = front_ios_boot_message();
         [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
     }
@@ -221,6 +300,7 @@ static void launcher_done(void) { [g_root startGame]; }
 }
 - (void)viewDidAppear:(BOOL)a {
     [super viewDidAppear:a];
+    if (!front_ios_boot_ok() && front_ios_romfs_url()) return;   // download UI owns this screen
     if (!front_ios_boot_ok() && front_ios_boot_message() && !self.presentedViewController) {   // a slim build whose game file image is missing or another version (main.m)
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Game files" message:@(front_ios_boot_message()) preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];

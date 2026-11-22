@@ -106,6 +106,8 @@ void dm_haptics_apple_controller(int player, GCController *controller) { (void)p
 
 int front_ios_boot_ok(void) { return 1; }
 void front_ios_boot(void) {}
+int front_ios_boot_reload(void) { return 1; }
+NSString *front_ios_romfs_url(void) { return nil; }
 bool dm_show_launcher(void *viewController, void (*done)(void)) { (void)viewController; (void)done; return false; }
 
 uint64_t g_t0_ns;

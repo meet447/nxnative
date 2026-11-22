@@ -35,6 +35,10 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true          # Documents (log.txt, saves) visible in the Files app
         LSSupportsOpeningDocumentsInPlace: true
+        # Slim IPA may download RomFS from a VPS (http or https) via RomfsDownload.m / romfs.url
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeRight
           - UIInterfaceOrientationLandscapeLeft

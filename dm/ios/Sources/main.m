@@ -106,6 +106,14 @@ static void aoc_locate(void) {
 static char g_boot_message[640];
 const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_message : NULL; }
 
+// Slim IPA with a VPS download: <App>/romfs.url (one URL line). NULL when absent.
+NSString *front_ios_romfs_url(void) {
+    NSString *path = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs.url"];
+    NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    NSString *url = [txt stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return url.length ? url : nil;
+}
+
 static bool g_hud_enabled_from_saved_choice;
 bool front_ios_hud_enabled_from_saved_choice(void) { return g_hud_enabled_from_saved_choice; }
 
@@ -300,6 +308,14 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
+
+// After a RomfsDownload writes Documents/romfs.img, re-run boot_env so DM_ROMFS and friends are set.
+int front_ios_boot_reload(void) {
+    g_boot_message[0] = 0;
+    g_boot_ok = boot_env();
+    fprintf(stderr, "boot: reload after romfs download → %s\n", g_boot_ok ? "ok" : "still missing");
+    return g_boot_ok;
+}
 
 @interface App : UIResponder <UIApplicationDelegate>
 @end
