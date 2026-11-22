@@ -122,14 +122,12 @@ static int str_contains_ci(const char *hay, const char *needle) {
 }
 
 static int ios_gpu_is_a16(id<MTLDevice> gpu) {
+    // Metal names the chip ("Apple A16 GPU"). A15 shares Apple8 and also lacks BC, so the name is the
+    // fork's filter. Architecture strings like applegpu_g15* are not relied on here.
     const char *name = gpu.name.UTF8String ?: "";
     if (str_contains_ci(name, "a16")) return 1;
     NSString *arch = [(id)gpu respondsToSelector:@selector(architecture)] ? gpu.architecture.name : nil;
-    const char *archc = arch.UTF8String ?: "";
-    if (str_contains_ci(archc, "a16")) return 1;
-    // iPhone 15 / 15 Plus (A16) report a G17-family GPU architecture name without always spelling "A16".
-    if (str_contains_ci(archc, "g17")) return 1;
-    return 0;
+    return str_contains_ci(arch.UTF8String ?: "", "a16");
 }
 
 const char *front_ios_device_check(void) {
