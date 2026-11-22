@@ -50,7 +50,7 @@ This fork transcodes BC textures to ASTC on the A16. Heavy games may need the In
 
 ### A16 testing order
 
-On iPhone 15 hardware, try lighter titles first — [FINAL FANTASY X/X-2 HD Remaster](dm/games/0100BC300CB48000/README.md), [Octopath Traveler 0](dm/games/01005270232F2000/README.md) and [TUNIC](dm/games/0100DA801624E000/README.md) — before [Breath of the Wild](dm/games/01007EF00011E000/README.md), which should wait until the bcrt render-target path lands on this fork.
+On iPhone 15 hardware, try lighter titles first — [FINAL FANTASY X/X-2 HD Remaster](dm/games/0100BC300CB48000/README.md), [Octopath Traveler 0](dm/games/01005270232F2000/README.md) and [TUNIC](dm/games/0100DA801624E000/README.md) — before heavier ASTC-transcoded games such as [Breath of the Wild](dm/games/01007EF00011E000/README.md) (bcrt shadows are supported; still watch memory on 6 GB phones).
 
 IPA builds from the packing script default to **no pipeline archive** (`DM_PSO_GPUS=none`): the iPhone compiles pipeline bases on first start. After measuring on A16, rebuild with `--gpu g15p` (or the `applegpu_…` name the device log reports). The iOS launcher defaults to **75% render scale** and **MetalFX** present upscale.
 
