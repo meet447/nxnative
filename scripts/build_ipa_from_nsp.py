@@ -62,7 +62,9 @@ BUNDLE_ID = ''                          # the app's bundle ID (empty = saved per
 ICON = ''                               # the app icon, a JPEG or PNG of any size (empty = the game's icon from its control data; a dump has none, a NUP may have none)
 FALLBACK_ICON = ''                      # the app icon only when ICON is empty and the game has none of its own (a dump, a NUP without one); empty = such an app's icon is blank
 ROMFS = 'bundle'                        # 'bundle' = the game files go into the IPA (or the Xcode app), as always; 'separate' = they stay out (DM_COPY_ROMFS=NO): the IPA is small, and its rebuilds do not pack or send the RomFS again.
-                                        #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for)
+                                        #   Copy it to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app checks that the image is the one it was built for),
+                                        #   or set ROMFS_URL / --romfs-url so the app downloads Documents/romfs.img from your VPS on first launch
+ROMFS_URL = ''                          # with ROMFS 'separate': HTTP(S) URL of RomFS.img on your VPS; baked into the app as romfs.url (empty = push_romfs.sh / Files only)
 SHADER_FILES = False                    # True = an NVN game's shader library goes into the IPA as its separate files, for install tools that cannot copy a large file (AltServer: 2 GiB; the game files
                                         #   then need ROMFS 'separate' too). False = the library is one file, which installs faster and other install tools take whatever its size
 PREPARE_XCODE = False                   # prepare a per-game Xcode project and add it to the workspace instead of packing an IPA; requires KEEP_EXTRACTED
@@ -3229,7 +3231,9 @@ def parse_args(argv):
     ap.add_argument('--app-name', help='app name on the home screen (default: the game name in the base NSP)')
     ap.add_argument('--bundle-id', help='the app\'s bundle ID (default: saved Xcode ID when preparing again, else org.nxnative.<base game title ID in lowercase>)')
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
-                    'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
+                    'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version), or downloaded from --romfs-url')
+    ap.add_argument('--romfs-url', metavar='URL', help='with --romfs separate: HTTP(S) URL of RomFS.img on your VPS; the IPA bakes it as romfs.url and the app downloads Documents/romfs.img on first launch '
+                    '(default: the ROMFS_URL setting; empty = no in-app download)')
     ap.add_argument('--shader-files', action=argparse.BooleanOptionalAction, help='an NVN game\'s shader library goes into the IPA as its separate files, not as one file, for install tools that cannot copy '
                     'a large file (AltServer: 2 GiB; the game files then need --romfs separate too) (default: the SHADER_FILES setting, off)')
     ap.add_argument('--prepare-xcode', action='store_true', help='prepare a per-game Xcode project and add it to the shared workspace instead of packing an IPA (requires keeping extracted files)')
@@ -3310,10 +3314,18 @@ def say_game(app, name, version, bundle_id, out, icon):
     say(f'app name: {name}; version: {version}; bundle ID: {bundle_id}' + (f'; app: {out}' if out and out.suffix == '.app' else ''))
 
 
-def say_push_romfs(image, bundle_id):
+def say_push_romfs(image, bundle_id, romfs_url=''):
     """The command that puts a --romfs separate build's game files on the phone. The image is the extraction's RomFS.img, which stays where it is while the game files are unchanged (the extraction is reused),
-    so the command is needed once per game and version, and again only when the image changed: the app compares its identity (size and a hash of the index) with the one it was built for and says so when it differs"""
-    say('the game files are not in this build. Copy them to the phone once, with the app installed (it is needed again only when the image changed, a new game version or another extraction):')
+    so the command is needed once per game and version, and again only when the image changed: the app compares its identity (size and a hash of the index) with the one it was built for and says so when it differs.
+    With --romfs-url the app downloads the image itself; still host that same file at the URL."""
+    if romfs_url:
+        say('the game files are not in this IPA; the app will download them from:')
+        PROG.say(f'  {romfs_url}')
+        say(f'upload this file to that URL (same bytes the build used for romfs.id):')
+        PROG.say(f'  {image}')
+        say('or push once with the Mac (optional):')
+    else:
+        say('the game files are not in this build. Copy them to the phone once, with the app installed (it is needed again only when the image changed, a new game version or another extraction):')
     PROG.say(f'  scripts/push_romfs.sh <device UDID> {bundle_id} "{image}"')
     # the file on disk, as build_ipa.sh's [ -f "$ROMFS" ] decides whether romfs.id is written: rfs.source() is a romfs.Path, whose is_dir() is True for an image's root (GitHub issue #530)
     if not os.path.isfile(image): say('[RED] the extraction holds a RomFS folder, not an image: this build carries no identity for it, and push_romfs.sh packs the folder first (delete extract/ and build again for an image)')
@@ -3687,7 +3699,11 @@ def main(args=None):
     ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(romfs), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang, CONTROL=str(control))
     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)
     separate = romfs_mode == 'separate'
+    romfs_url = (args.romfs_url if getattr(args, 'romfs_url', None) is not None else ROMFS_URL).strip()
+    if romfs_url and not separate: raise BuildError('--romfs-url / ROMFS_URL needs --romfs separate (the IPA must omit the game files)')
+    if romfs_url and not re.match(r'https?://', romfs_url, re.I): raise BuildError(f'--romfs-url / ROMFS_URL must be an http(s) URL: {romfs_url}')
     if separate: ipa_env['DM_COPY_ROMFS'] = 'NO'; say('game files: separate (DM_COPY_ROMFS=NO), left out of the app; the image stays at ' + str(romfs))
+    if romfs_url: ipa_env['DM_ROMFS_URL'] = romfs_url; say(f'game files download URL: {romfs_url} (baked as romfs.url; the app downloads Documents/romfs.img on first launch)')
     if shader_files: ipa_env['DM_SHADER_FILES'] = '1'; say('shader library: its separate files (DM_SHADER_FILES=1), for install tools that cannot copy a large file')
     if app_version: ipa_env['DM_APP_VERSION'] = app_version
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
@@ -3717,7 +3733,7 @@ def main(args=None):
         say(f'ready: {workspace}')
         say(f'game project: {project}')
         say(f'Xcode derived data: {work / "xcode-derived-data"}')
-        if separate: say_push_romfs(romfs, bundle_id)
+        if separate: say_push_romfs(romfs, bundle_id, romfs_url)
         say('choose the game scheme in Xcode, select your Team and iPhone or iPad, then Run (Release)')
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Xcode project', patched)
         return
@@ -3733,7 +3749,7 @@ def main(args=None):
     if not keep:
         for d in [ex] + [r['ex'] for r in programs.values()]: say(f'deleting the extracted game files: {d}'); rmtree(d)
     say(f'done: {out_ipa} ({out_ipa.stat().st_size / 2**30:.1f} GB)')
-    if separate: say_push_romfs(romfs, bundle_id)
+    if separate: say_push_romfs(romfs, bundle_id, romfs_url)
     report_profile_status(g, reg, pkg_ver, derived, provisional, patched=patched)
 
 

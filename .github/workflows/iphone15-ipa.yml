@@ -29,6 +29,11 @@ on:
         required: false
         type: string
         default: ""
+      romfs_url:
+        description: Optional HTTP(S) URL of RomFS.img on your VPS. Builds a slim IPA (--romfs separate) that downloads game data on first launch. Leave blank to pack RomFS into the IPA.
+        required: false
+        type: string
+        default: ""
       profile_id:
         description: Optional profile ID override (16 hex digits; blank = detect from the base NSP)
         required: false
@@ -456,6 +461,7 @@ jobs:
       - name: Build unsigned IPA (single pass)
         env:
           DM_PSO_GPUS: none
+          ROMFS_URL: ${{ inputs.romfs_url }}
         run: |
           set -euo pipefail
           # No nxnative_ci_guard.py two-pass RomFS handoff: that helper and its profile patches are not in this fork.
@@ -465,16 +471,34 @@ jobs:
           LOG="$RUNNER_TEMP/build.log"
           mkdir -p logs
 
+          EXTRA=()
+          if [[ -n "${ROMFS_URL:-}" ]]; then
+            EXTRA+=(--romfs separate --romfs-url "$ROMFS_URL" --keep-extracted)
+            echo "Slim IPA: RomFS left out; app will download from ROMFS_URL"
+          fi
+
           python scripts/build_ipa_from_nsp.py \
             "$GAME_DIR" \
             -k "$WORK/prod.keys" \
             --allow-other-metal \
-            -o "$OUTPUT" 2>&1 | tee "$LOG"
+            -o "$OUTPUT" \
+            "${EXTRA[@]}" 2>&1 | tee "$LOG"
 
           [[ -s "$OUTPUT" ]] || { echo "::error::IPA build produced no output."; exit 1; }
           ls -lh "$OUTPUT"
           cp "$LOG" logs/build.log
           find "$GAME_DIR" -path '*_build/logs' -type d -exec cp -R {} logs/ \; 2>/dev/null || true
+
+          if [[ -n "${ROMFS_URL:-}" ]]; then
+            IMG=$(find "$GAME_DIR" -name 'RomFS.img' -type f | head -1 || true)
+            echo "::notice::Upload this RomFS.img to your VPS at the romfs_url you passed: ${IMG:-"(see build log)"}"
+            if [[ -n "$IMG" ]]; then
+              mkdir -p artifacts
+              # Do not upload multi-GB RomFS as a GitHub artifact by default; only print the path for the runner host / self-hosted copy step.
+              ls -lh "$IMG"
+              echo "ROMFS_IMG=$IMG" >> "$GITHUB_ENV"
+            fi
+          fi
 
       - name: Upload IPA
         if: success()

@@ -271,12 +271,17 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, 
 else
 MAPS=()
 if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
-  t "no game files in the IPA (DM_COPY_ROMFS=NO): the app takes Documents/romfs.img (scripts/push_romfs.sh)"
+  t "no game files in the IPA (DM_COPY_ROMFS=NO): the app takes Documents/romfs.img (scripts/push_romfs.sh or an in-app download from romfs.url)"
   # The image's identity (dm/host/romfs_identity.h) goes into the app as romfs.id: main.m then uses only a Documents/romfs.img with the same size and index hash, and says so when it is another version or missing.
   # A RomFS folder has no image to name yet (push_romfs.sh packs it on the Mac), so such a build carries no identity and accepts any complete image
   if [ -f "$ROMFS" ]; then
     mkdir -p "$O" && python3 -I "$DM/tools/romfs_image.py" --identity "$ROMFS" "$GAME" "$DM_APP_VERSION" "${PKG:-}" > "$O/romfs.id" || die "identity of $ROMFS"
     MAPS=("$P/romfs.id=$O/romfs.id"); t "game files identity: $(cat "$O/romfs.id")"
+  fi
+  # Optional VPS URL (DM_ROMFS_URL): one line in <App>/romfs.url; the app downloads Documents/romfs.img on first launch (RomfsDownload.m)
+  if [ -n "${DM_ROMFS_URL:-}" ]; then
+    printf '%s\n' "$DM_ROMFS_URL" > "$O/romfs.url" || die "write romfs.url"
+    MAPS+=("$P/romfs.url=$O/romfs.url"); t "game files download URL: $DM_ROMFS_URL"
   fi
 elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
