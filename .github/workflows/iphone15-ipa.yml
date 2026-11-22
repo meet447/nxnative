@@ -170,10 +170,10 @@ jobs:
               print(f"Packed {len(files)} file(s) from Drive folder into {output.name}", flush=True)
           elif file_id:
               print(f"Google Drive file id={file_id[:6]}… → gdown", flush=True)
-              r = subprocess.run(["gdown", "--fuzzy", f"https://drive.google.com/uc?id={file_id}", "-O", str(output)])
+              # Prefer bare file id (works across gdown versions; --fuzzy is not always present)
+              r = subprocess.run(["gdown", file_id, "-O", str(output)])
               if r.returncode != 0:
-                  # retry with bare id (older gdown)
-                  r = subprocess.run(["gdown", file_id, "-O", str(output)])
+                  r = subprocess.run(["gdown", f"https://drive.google.com/uc?id={file_id}", "-O", str(output)])
               if r.returncode != 0:
                   raise SystemExit(f"gdown failed (exit {r.returncode})")
           elif parsed.scheme in ("http", "https"):
