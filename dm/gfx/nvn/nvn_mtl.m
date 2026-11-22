@@ -30,6 +30,7 @@
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
 #include "../tex/nvn_bcdec.h"
+#include "../tex/nvn_astcenc.h"
 #include "nvn_builtin.h"
 #include "host_msl.h"
 #include "nvn_dirty.h"
@@ -3163,11 +3164,50 @@ static int no_bc(void) {
     if (v < 0) {
         const char *e = getenv("DM_TEST_NO_BC");
         v = (e && *e && strcmp(e, "0")) || !g_dev.supportsBCTextureCompression;
-        if (v) MLOG("GPU has no BC texture formats%s: BC textures are created decompressed (BC1–5 on GPU, BC6H/BC7/3D on CPU)", e && *e && strcmp(e, "0") ? " (DM_TEST_NO_BC)" : "");
+        if (v) MLOG("GPU has no BC texture formats%s: BC textures are transcoded to ASTC (BC6H stays RGBA16F; DM_NVN_BC_RGBA=1 forces RGBA unpack)", e && *e && strcmp(e, "0") ? " (DM_TEST_NO_BC)" : "");
     }
     return v;
 }
-static int bc_unpack(uint32_t nvn_fmt, uint32_t *pf, int *bpp) { return no_bc() && nvn_bc_unpacked(nvn_fmt, pf, bpp); }
+static int bc_rgba_on(void) {
+    const char *e = getenv("DM_NVN_BC_RGBA");
+    return e && *e && strcmp(e, "0");
+}
+static int bc_astc_host(uint32_t nvn_fmt, nvn_astc_profile *out) {
+    return no_bc() && !bc_rgba_on() && nvn_bc_astc_profile(nvn_fmt, out) && !out->is_hdr;
+}
+static size_t bc_astc_pitch(const nvn_astc_profile *p, uint32_t w) { return ((size_t)(w + (uint32_t)p->block_w - 1) / (uint32_t)p->block_w) * 16; }
+static void bc_to_rgba8(uint32_t fmt, uint32_t w, uint32_t h, const uint8_t *raw, size_t raw_pitch, uint8_t *rgba, size_t rgba_pitch) {
+    for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
+        uint8_t *d = rgba + y * rgba_pitch + x * 4;
+        if (fmt == 0x49 || fmt == 0x4a) {
+            uint8_t r = raw[y * raw_pitch + x];
+            d[0] = d[1] = d[2] = r;
+            d[3] = 255;
+        } else if (fmt == 0x4b || fmt == 0x4c) {
+            const uint8_t *s = raw + y * raw_pitch + x * 2;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = 0;
+            d[3] = 255;
+        } else {
+            const uint8_t *s = raw + y * raw_pitch + x * 4;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = s[3];
+        }
+    }
+}
+static int bc_unpack(uint32_t nvn_fmt, uint32_t *pf, int *bpp) {
+    if (!no_bc()) return 0;
+    nvn_astc_profile ap;
+    if (bc_astc_host(nvn_fmt, &ap)) {
+        *pf = ap.mtl_pf;
+        *bpp = 4;
+        return 1;
+    }
+    return nvn_bc_unpacked(nvn_fmt, pf, bpp);
+}
 // Under DM_NVN_DIRTYCHECK, at an upload: the hash of the whole content, and of the texture's bytes in each host page, so a miss can name the pages that changed (pkg_miss_report)
 static void pkg_hash_take(NvPkg *pk, const tex_t *t) {
     if (!dirtycheck() || pk->sparse) return;
@@ -3295,7 +3335,9 @@ static int tex_2d_size_exceeds_limit(const tex_t *t) {
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
-    int unp = 0; { uint32_t upf; int ubpp; if (bc_unpack(t->d.format, &upf, &ubpp)) { pf = upf; unp = 1; } }
+    int unp = 0, astc = 0;
+    nvn_astc_profile ap;
+    { uint32_t upf; int ubpp; if (bc_unpack(t->d.format, &upf, &ubpp)) { pf = upf; unp = 1; astc = bc_astc_host(t->d.format, &ap); } }
     // Catch dimensions that would cause Metal's descriptor validation to abort.
     if (tex_2d_size_exceeds_limit(t) || t->d.depth > 2048) { RED_ONCE(71, "texture size exceeds Metal limits: %u×%u×%u levels %u format %#x target %d (first case ser=%llu)", t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->serial); return nil; }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
@@ -3344,7 +3386,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     d.storageMode = MTLStorageModePrivate;   // Render targets and assets both go in GPU private storage (lossless compression available)
     d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
             | img_usage(t, d.pixelFormat)   // Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.)
-            | (unp ? MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView : 0);   // No BC: written by the GPU decompression kernel (up_dec) / ASTC whole-block copies (copy_t2t_astc)
+            | (unp && !astc ? MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView : 0);   // No BC: GPU bcd for unpacked RGBA; ASTC host textures stay read-only
     // A depth-stencil texture has the format-view usage from the start: its stencil is read through an X32_Stencil8 view (stencil-mode views and textures, the depth-stencil copy), which Metal's
     // contract allows only with that usage. Apple GPUs read the view correctly without it, but the API validation layer aborts the process at the first such view (PR #106, found on Luigi's
     // Mansion 3), and upgrading later would recreate a depth buffer in use. Unlike colour formats it costs nothing measured: on an M4 Pro a 2560x1440 one has the same allocated size and the same
@@ -4064,7 +4106,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // linear storage no view could take (linear_fit): its rows are copied on the CPU
     int direct = !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
-    uint32_t upf; int ubpp = 0, unp = bc_unpack(t->d.format, &upf, &ubpp);
+    uint32_t upf; int ubpp = 0;
+    nvn_astc_profile astc_prof;
+    int astc_host = bc_astc_host(t->d.format, &astc_prof);
+    int unp = astc_host || bc_unpack(t->d.format, &upf, &ubpp);
     if (unp) direct = 0;
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
@@ -4093,9 +4138,12 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
         uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
         unsigned n = layers; if (need) { n = 0; for (unsigned y = 0; y < layers; y++) n += need[l * layers + y]; }
-        total += unp ? (size_t)w * ubpp * h * z * n : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
+        if (astc_host)
+            total += bc_astc_pitch(&astc_prof, w) * ((h + (uint32_t)astc_prof.block_h - 1) / (uint32_t)astc_prof.block_h) * z * n;
+        else
+            total += unp ? (size_t)w * ubpp * h * z * n : (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
     }
-    int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();
+    int gdec = unp && !astc_host && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();
     size_t ctotal = 0;
     if (gdec) for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
         uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
@@ -4116,7 +4164,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         up_begin(); src_batch = g_up_seq;
         if (!sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0)) { free(spt); spt = NULL; }
     }
-    int use_gpu = (!unp || gdec) && !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
+    int use_gpu = !astc_host && (!unp || gdec) && !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
     t_tex_upload_lookup = 0;
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear && !unp) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
@@ -4210,6 +4258,26 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         for (unsigned y = 0; y < layers; y++) {
             if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
             if (unp) {
+                if (astc_host) {
+                    size_t apitch = bc_astc_pitch(&astc_prof, w), arows = (h + (uint32_t)astc_prof.block_h - 1) / (uint32_t)astc_prof.block_h;
+                    int ch = (t->d.format == 0x49 || t->d.format == 0x4a) ? 1 : (t->d.format == 0x4b || t->d.format == 0x4c) ? 2 : 4;
+                    size_t raw_pitch = (size_t)w * (size_t)ch, rgba_pitch = (size_t)w * 4;
+                    uint8_t *cb = malloc(pitch * rows * z);
+                    uint8_t *raw = malloc(raw_pitch * h);
+                    uint8_t *rgba = malloc(rgba_pitch * h);
+                    if (!cb || !raw || !rgba || nvn_deswizzle(&t->d, l, y, src, cb, pitch)) { free(cb); free(raw); free(rgba); RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+                    for (uint32_t zi = 0; zi < z; zi++) {
+                        if (nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, raw, raw_pitch)) { free(cb); free(raw); free(rgba); break; }
+                        bc_to_rgba8(t->d.format, w, h, raw, raw_pitch, rgba, rgba_pitch);
+                        if (nvn_astc_encode_rgba8(&astc_prof, rgba, rgba_pitch, w, h, (uint8_t *)stg.contents + off + zi * apitch * arows, apitch)) { free(cb); free(raw); free(rgba); break; }
+                    }
+                    free(cb);
+                    free(raw);
+                    free(rgba);
+                    up_blit_add(stg, off, apitch, apitch * arows, MTLSizeMake(w, h, z), mt, y, l);
+                    off += apitch * arows * z;
+                    continue;
+                }
                 uint8_t *cb = malloc(pitch * rows * z); size_t up = (size_t)w * ubpp;
                 if (!cb || nvn_deswizzle(&t->d, l, y, src, cb, pitch)) { free(cb); RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
                 for (uint32_t zi = 0; zi < z; zi++) nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, (uint8_t *)stg.contents + off + zi * up * h, up);
@@ -17205,9 +17273,35 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
         sb = (__bridge id<MTLBuffer>)mb;
     }
     uint32_t upf; int ubpp;
-    if (bc_unpack(c->tex->d.format, &upf, &ubpp)) {
+    nvn_astc_profile astc_prof;
+    int astc_host = bc_astc_host(c->tex->d.format, &astc_prof);
+    if (astc_host || bc_unpack(c->tex->d.format, &upf, &ubpp)) {
         const uint8_t *bcsrc = (uint8_t *)sb.contents + mo;
         if (!bcsrc) { RED_ONCE(46, "no BC decompress: buffer→texture copy source buffer not readable on CPU"); return; }
+        if (astc_host) {
+            uint32_t w = c->r.width, h = c->r.height;
+            int ch = (c->tex->d.format == 0x49 || c->tex->d.format == 0x4a) ? 1 : (c->tex->d.format == 0x4b || c->tex->d.format == 0x4c) ? 2 : 4;
+            size_t raw_pitch = (size_t)w * (size_t)ch, rgba_pitch = (size_t)w * 4;
+            size_t apitch = bc_astc_pitch(&astc_prof, w), arows = (h + (uint32_t)astc_prof.block_h - 1) / (uint32_t)astc_prof.block_h;
+            size_t ablock = apitch * arows;
+            id<MTLBuffer> tb = [g_dev newBufferWithLength:ablock * nz ?: 16 options:MTLResourceStorageModeShared];
+            uint8_t *raw = malloc(raw_pitch * h), *rgba = malloc(rgba_pitch * h);
+            if (!raw || !rgba) { free(raw); free(rgba); defer_obj_release(tb); return; }
+            for (int z = 0; z < nz; z++) {
+                if (nvn_bc_decode(c->tex->d.format, bcsrc + z * img, row, w, h, raw, raw_pitch)) break;
+                bc_to_rgba8(c->tex->d.format, w, h, raw, raw_pitch, rgba, rgba_pitch);
+                nvn_astc_encode_rgba8(&astc_prof, rgba, rgba_pitch, w, h, (uint8_t *)tb.contents + z * ablock, apitch);
+            }
+            free(raw);
+            free(rgba);
+            res_add(tb);
+            id<MTL4ComputeCommandEncoder> bbc = blit();
+            if (is3d) enc_b_copy_buffer_texture(bbc, tb, 0, apitch, ablock, MTLSizeMake(w, h, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
+            else for (int z = 0; z < nz; z++) enc_b_copy_buffer_texture(bbc, tb, z * ablock, apitch, ablock, MTLSizeMake(w, h, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+            defer_obj_release(tb);
+            if (paired) bcp_after(c->tex, level, &c->r);
+            return;
+        }
         size_t up = (size_t)c->r.width * ubpp, uimg = up * c->r.height;
         id<MTLBuffer> tb = [g_dev newBufferWithLength:uimg * nz ?: 16 options:MTLResourceStorageModeShared];
         for (int z = 0; z < nz; z++) nvn_bc_decode(c->tex->d.format, bcsrc + z * img, row, c->r.width, c->r.height, (uint8_t *)tb.contents + z * uimg, up);

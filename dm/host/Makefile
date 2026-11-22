@@ -50,6 +50,24 @@ gen/dav1d/%.o: $(DAV1D)/% $(DAV1D_H) ../mac/min_os.mk
 	clang -O2 -g -mmacosx-version-min=$(MACOS_MIN) -fvisibility=hidden -fomit-frame-pointer -fno-align-functions -I$(DAV1D) -I$(DAV1D)/include -I$(DAV1D)/config -c $< -o $@
 $(DAV1D_LIB): $(DAV1D_OBJ)
 	rm -f $@; ar rcs $@ $^
+# Third party: astcenc (ARM astc-encoder core), built for BC→ASTC transcode on the A16 no-BC path (dm/gfx/tex/nvn_astcenc.cpp)
+ASTCENC=../third_party/astcenc
+ASTCENC_SRC=$(sort $(wildcard $(ASTCENC)/*.cpp))
+ASTCENC_OBJ=$(patsubst $(ASTCENC)/%.cpp,gen/astcenc/%.o,$(ASTCENC_SRC))
+ASTCENC_LIB=gen/astcenc/libastcenc.a
+ifeq ($(shell uname -m),arm64)
+ASTCENC_CXX=clang++
+ASTCENC_VEC=-DASTCENC_NEON=1 -DASTCENC_SSE=0 -DASTCENC_AVX=0 -DASTCENC_SVE=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0
+else
+ASTCENC_CXX=g++
+ASTCENC_VEC=-DASTCENC_SSE=20 -DASTCENC_AVX=0 -DASTCENC_NEON=0 -DASTCENC_SVE=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0
+endif
+ASTCENC_CXXFLAGS=-O2 -g -std=c++11 -mmacosx-version-min=$(MACOS_MIN) $(ASTCENC_VEC) -I$(ASTCENC)
+gen/astcenc/%.o: $(ASTCENC)/%.cpp Makefile ../mac/min_os.mk
+	@mkdir -p $(dir $@)
+	$(ASTCENC_CXX) $(ASTCENC_CXXFLAGS) -c $< -o $@
+$(ASTCENC_LIB): $(ASTCENC_OBJ)
+	rm -f $@; ar rcs $@ $^
 # The host's own Metal shaders (dm/gfx/msl/*.metal) compiled for MSL_SDK into gen/msl-<sdk>/host_msl_gen.h (dm/gfx/tools/host_msl.py; dm/gfx/nvn/host_msl.m loads them), so the host
 # compiles no MSL at run time. The iOS build (dm/ios/tools/gen_build.py) makes it with MSL_SDK=iphoneos, for the app's deployment target (MSL_MIN_iphoneos, as project.yml)
 MSL_SDK ?= macosx
@@ -74,14 +92,18 @@ FORCE:
 # the same flags (as clang's one-step compile and link gives each of its jobs the whole line) and its dSYM made from the objects, as clang does after its own link. Each object
 # lists the headers its source read (-MMD; -MP: a removed header is no error), so an edit rebuilds the objects that include it and the link; the Makefile (CFLAGS, these lines)
 # rebuilds them all. The generated headers come first (order-only: the dependency files name them for the sources that read them). The NSP script builds gen/<id>/dmhost and takes it
-HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc
+HOST_CFLAGS = $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I$(ASTCENC) -I../third_party/stb_vorbis -fobjc-arc
+HOST_CXX=clang++
+HOST_CXXFLAGS=$(CFLAGS) -I../gfx/nvn/include -I$(ASTCENC) -std=c++11
 HOST_FRAMEWORKS = -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework CoreAudio -framework AVFAudio -framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
 HOST_SRC = $(SRC) $(GFX)
 ifneq ($(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))),)
 $(error host sources outside dm/host and dm/gfx need an object rule: $(filter ../%,$(filter-out ../gfx/%,$(HOST_SRC))))
 endif
 OBJ_DIR = gen/$(GAME)/obj
-HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(OBJ_DIR)/host/$(s).o))   # the line's order: the link lays code out in it
+HOST_CXX_SRC=../gfx/tex/nvn_astcenc.cpp
+HOST_CXX_OBJ=$(OBJ_DIR)/gfx/tex/nvn_astcenc.cpp.o
+HOST_OBJ = $(foreach s,$(HOST_SRC),$(if $(filter ../gfx/%,$(s)),$(OBJ_DIR)/gfx/$(s:../gfx/%=%).o,$(OBJ_DIR)/host/$(s).o)) $(HOST_CXX_OBJ)   # the line's order: the link lays code out in it
 HOST_BIN = gen/$(GAME)/dmhost
 $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
@@ -89,8 +111,11 @@ $(OBJ_DIR)/host/%.o: % Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 $(OBJ_DIR)/gfx/%.o: ../gfx/% Makefile ../mac/min_os.mk | $(GAME_H) $(MSL_H)
 	@mkdir -p $(dir $@)
 	clang $(HOST_CFLAGS) -MMD -MP -c $< -o $@
-$(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) Makefile ../mac/min_os.mk
-	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(HOST_FRAMEWORKS)
+$(HOST_CXX_OBJ): $(HOST_CXX_SRC) Makefile ../mac/min_os.mk
+	@mkdir -p $(dir $@)
+	$(HOST_CXX) $(HOST_CXXFLAGS) -c $< -o $@
+$(HOST_BIN): $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(ASTCENC_LIB) Makefile ../mac/min_os.mk
+	clang $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(VPX_LIB) $(DAV1D_LIB) $(ASTCENC_LIB) -lc++ $(HOST_FRAMEWORKS)
 	dsymutil $@
 ifneq ($(strip $(GAME)),)
 -include $(HOST_OBJ:.o=.d)
