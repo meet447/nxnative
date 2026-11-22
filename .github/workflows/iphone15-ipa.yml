@@ -29,8 +29,13 @@ on:
         required: false
         type: string
         default: ""
+      slim_ipa:
+        description: Slim IPA — leave RomFS out, upload RomFS.img to S3, bake the public download URL into the app (requires S3_BUCKET + AWS credentials secrets). Off = pack full RomFS into the IPA.
+        required: false
+        type: boolean
+        default: true
       romfs_url:
-        description: Optional HTTP(S) URL of RomFS.img on your VPS. Builds a slim IPA (--romfs separate) that downloads game data on first launch. Leave blank to pack RomFS into the IPA.
+        description: Advanced override — public HTTP(S) URL of RomFS.img (skips S3 upload). Leave blank for automatic S3 URL when slim_ipa is on.
         required: false
         type: string
         default: ""
@@ -458,10 +463,55 @@ jobs:
           echo "DM_GAME=$PROFILE_ID" >> "$GITHUB_ENV"
           echo "Detected $DETECTED_ID; building profile $PROFILE_ID"
 
+      # Slim IPA: derive a stable public URL before packing so romfs.url is baked in, then upload RomFS.img to that key after the build.
+      - name: Plan slim IPA download URL (S3)
+        id: slim
+        env:
+          SLIM_IPA: ${{ inputs.slim_ipa }}
+          ROMFS_URL_OVERRIDE: ${{ inputs.romfs_url }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_PREFIX: ${{ secrets.S3_PREFIX }}
+          S3_PUBLIC_BASE_URL: ${{ secrets.S3_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ "${SLIM_IPA}" != "true" ]]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "Full IPA: RomFS packed into the app"
+            exit 0
+          fi
+          if [[ -n "${ROMFS_URL_OVERRIDE:-}" ]]; then
+            echo "mode=url" >> "$GITHUB_OUTPUT"
+            echo "romfs_url=${ROMFS_URL_OVERRIDE}" >> "$GITHUB_OUTPUT"
+            echo "Slim IPA: using romfs_url override (no S3 upload)"
+            exit 0
+          fi
+          if [[ -z "${S3_BUCKET:-}" ]]; then
+            echo "::error::slim_ipa is on but secret S3_BUCKET is empty. Add S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION (and optional S3_PUBLIC_BASE_URL / S3_PREFIX), or pass romfs_url, or turn slim_ipa off."
+            exit 1
+          fi
+          REGION="${AWS_REGION:-us-east-1}"
+          PREFIX="${S3_PREFIX:-nxnative}"
+          PREFIX="${PREFIX#/}"; PREFIX="${PREFIX%/}"
+          KEY="${PREFIX}/${DM_GAME}/romfs.img"
+          if [[ -n "${S3_PUBLIC_BASE_URL:-}" ]]; then
+            BASE="${S3_PUBLIC_BASE_URL%/}"
+            URL="${BASE}/${KEY}"
+          else
+            URL="https://${S3_BUCKET}.s3.${REGION}.amazonaws.com/${KEY}"
+          fi
+          echo "mode=s3" >> "$GITHUB_OUTPUT"
+          echo "romfs_url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "s3_bucket=${S3_BUCKET}" >> "$GITHUB_OUTPUT"
+          echo "s3_key=${KEY}" >> "$GITHUB_OUTPUT"
+          echo "aws_region=${REGION}" >> "$GITHUB_OUTPUT"
+          echo "Slim IPA + S3: bake ${URL} into the app, then upload RomFS.img to s3://${S3_BUCKET}/${KEY}"
+
       - name: Build unsigned IPA (single pass)
         env:
           DM_PSO_GPUS: none
-          ROMFS_URL: ${{ inputs.romfs_url }}
+          SLIM_MODE: ${{ steps.slim.outputs.mode }}
+          ROMFS_URL: ${{ steps.slim.outputs.romfs_url }}
         run: |
           set -euo pipefail
           # No nxnative_ci_guard.py two-pass RomFS handoff: that helper and its profile patches are not in this fork.
@@ -472,9 +522,9 @@ jobs:
           mkdir -p logs
 
           EXTRA=()
-          if [[ -n "${ROMFS_URL:-}" ]]; then
+          if [[ "${SLIM_MODE}" != "full" ]]; then
             EXTRA+=(--romfs separate --romfs-url "$ROMFS_URL" --keep-extracted)
-            echo "Slim IPA: RomFS left out; app will download from ROMFS_URL"
+            echo "Slim IPA: RomFS left out; download URL baked as romfs.url → $ROMFS_URL"
           fi
 
           python scripts/build_ipa_from_nsp.py \
@@ -489,16 +539,38 @@ jobs:
           cp "$LOG" logs/build.log
           find "$GAME_DIR" -path '*_build/logs' -type d -exec cp -R {} logs/ \; 2>/dev/null || true
 
-          if [[ -n "${ROMFS_URL:-}" ]]; then
+          if [[ "${SLIM_MODE}" != "full" ]]; then
             IMG=$(find "$GAME_DIR" -name 'RomFS.img' -type f | head -1 || true)
-            echo "::notice::Upload this RomFS.img to your VPS at the romfs_url you passed: ${IMG:-"(see build log)"}"
-            if [[ -n "$IMG" ]]; then
-              mkdir -p artifacts
-              # Do not upload multi-GB RomFS as a GitHub artifact by default; only print the path for the runner host / self-hosted copy step.
-              ls -lh "$IMG"
-              echo "ROMFS_IMG=$IMG" >> "$GITHUB_ENV"
-            fi
+            [[ -n "$IMG" ]] || { echo "::error::Slim IPA build produced no RomFS.img to upload."; exit 1; }
+            ls -lh "$IMG"
+            echo "ROMFS_IMG=$IMG" >> "$GITHUB_ENV"
           fi
+
+      - name: Upload RomFS.img to S3
+        if: success() && steps.slim.outputs.mode == 's3'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ steps.slim.outputs.aws_region }}
+          S3_BUCKET: ${{ steps.slim.outputs.s3_bucket }}
+          S3_KEY: ${{ steps.slim.outputs.s3_key }}
+          ROMFS_URL: ${{ steps.slim.outputs.romfs_url }}
+        run: |
+          set -euo pipefail
+          [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || {
+            echo "::error::S3 upload needs secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY."
+            exit 1
+          }
+          [[ -s "${ROMFS_IMG:-}" ]] || { echo "::error::ROMFS_IMG missing after build."; exit 1; }
+          if ! command -v aws >/dev/null; then
+            pip install --quiet 'awscli>=1.32,<2'
+          fi
+          echo "Uploading $(ls -lh "$ROMFS_IMG" | awk '{print $5}') → s3://${S3_BUCKET}/${S3_KEY}"
+          # Bucket policy (or CloudFront) should allow public GetObject on this prefix; ACL is optional and often blocked.
+          aws s3 cp "$ROMFS_IMG" "s3://${S3_BUCKET}/${S3_KEY}" --only-show-errors
+          echo "::notice::RomFS available at ${ROMFS_URL}"
+          aws s3api head-object --bucket "$S3_BUCKET" --key "$S3_KEY" >/dev/null
+          echo "S3 object OK ($(stat -f%z "$ROMFS_IMG") bytes)"
 
       - name: Upload IPA
         if: success()
