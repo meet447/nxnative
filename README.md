@@ -48,6 +48,8 @@ Community projects build on nxnative with tools to turn your games into apps for
 
 This fork decompresses BC textures on the A16. Heavy games may need the Increased Memory Limit entitlement and can still run out of memory (Breath of the Wild–class titles). Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
 
+IPA builds from the packing script default to **no pipeline archive** (`DM_PSO_GPUS=none`): the iPhone compiles pipeline bases on first start. After measuring on A16, rebuild with `--gpu g15p` (or the `applegpu_…` name the device log reports). The iOS launcher defaults to **75% render scale** and **MetalFX** present upscale.
+
 For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
 
 ## How to play
