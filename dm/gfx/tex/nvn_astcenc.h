@@ -3,6 +3,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t mtl_pf; // Metal pixel format enum value
     int block_w, block_h;
@@ -16,3 +20,7 @@ int nvn_bc_astc_profile(uint32_t nvn_fmt, nvn_astc_profile *out);
 // Returns 0 on success.
 int nvn_astc_encode_rgba8(const nvn_astc_profile *prof, const uint8_t *src, size_t src_pitch,
                          uint32_t w, uint32_t h, uint8_t *dst, size_t dst_pitch);
+
+#ifdef __cplusplus
+}
+#endif
