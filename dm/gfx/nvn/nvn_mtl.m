@@ -925,7 +925,8 @@ static void mtl_init_once(void) {
         return;
     }
     // Without native BC, textures are transcoded to ASTC at upload (no_bc, nvn_astcenc); DM_NVN_BC_RGBA=1 uses unpacked RGBA (nvn_bcdec.c, GPU bcd for BC1–5)
-    if (!g_dev.supportsBCTextureCompression || (getenv("DM_TEST_NO_BC") && *getenv("DM_TEST_NO_BC") && strcmp(getenv("DM_TEST_NO_BC"), "0"))) (void)no_bc();
+    { const char *e = getenv("DM_TEST_NO_BC");
+      if (!g_dev.supportsBCTextureCompression || (e && *e && strcmp(e, "0"))) (void)no_bc(); }
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
     for (int i = 0; i < 3; i++) {
@@ -4214,7 +4215,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                     size_t qoff; id<MTLBuffer> q = up_param_alloc(&qoff);
                     if (!v || !q) { enc_ok = 0; break; }
                     uint32_t *pp = (uint32_t *)((uint8_t *)q.contents + qoff); pp[0] = (uint32_t)(stg_off + off); pp[1] = (uint32_t)pitch; pp[2] = w; pp[3] = h; pp[4] = (uint32_t)bcd_fmt(t->d.format);
-                    if (g_nup_decs == g_up_deccap) { g_up_deccap = g_up_deccap ? g_up_deccap * 2 : 256; g_up_decs = realloc(g_up_decs, g_up_deccap * sizeof *g_up_decs); }
+                    if (g_nup_decs == g_up_deccap) {
+                        g_up_deccap = g_up_deccap ? g_up_deccap * 2 : 256;
+                        g_up_decs = realloc_or_die(g_up_decs, g_up_deccap * sizeof *g_up_decs, "the GPU BC decompressions");
+                    }
                     g_up_decs[g_nup_decs++] = (up_dec){stg, q, 0, qoff, (w + 3) / 4, (h + 3) / 4, v};
                     [g_up_texs addObject:v]; defer_obj_unref(v);
                 } else
@@ -4249,6 +4253,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     up_begin();
     id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+    if (!stg) MDIE("texture upload staging buffer of %zu bytes failed", total ? total : 16);
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
