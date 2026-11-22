@@ -43,11 +43,10 @@ Community projects build on nxnative with tools to turn your games into apps for
 
 ## Requirements
 
-- **Mac:** Apple silicon, macOS 26.6 or later. Building games requires Xcode 27.2.
-- **iPhone:** A17 Pro chip or later, with iOS 26 or later.
-- **iPad:** M1 chip or later, with iPadOS 26 or later.
+- **Mac:** Apple silicon (M-series), macOS 26.6 or later. Building games requires Xcode 27.2.
+- **iPhone:** A16 only (iPhone 15 and 15 Plus), iOS 26 or later.
 
-The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
+This fork decompresses BC textures on the A16. Heavy games may need the Increased Memory Limit entitlement and can still run out of memory (Breath of the Wild–class titles). Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
 
 For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
 

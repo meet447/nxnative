@@ -6,7 +6,9 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <strings.h>
 #include <string.h>
+#include <TargetConditionals.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
@@ -107,18 +109,54 @@ const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_mes
 static bool g_hud_enabled_from_saved_choice;
 bool front_ios_hud_enabled_from_saved_choice(void) { return g_hud_enabled_from_saved_choice; }
 
-// Why this device cannot run the games: its GPU has no BC texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older,
-// GitHub issue #704), so the screen says so instead of Metal aborting at the game's first BC texture. NULL on a supported device. Called by startGame (front_ios.m) once the launcher has set
-// its switches, so this device check gives front_hud_env() a chance to enable the Performance HUD at Play (GitHub issue #840).
+// Whether this iOS build may run on the default Metal device. This fork is A16-only on iPhone (15 / 15 Plus): BC textures are decompressed in software (dm/gfx/tex/README.md). GPUs with native BC
+// (A17 Pro and later iPhones, M-series iPads) and older iPhones without BC are refused here instead of aborting at the first BC texture. NULL on a supported device. Called by startGame (front_ios.m)
+// once the launcher has set its switches, so front_hud_env() can enable the Performance HUD at Play (GitHub issue #840).
+static int str_contains_ci(const char *hay, const char *needle) {
+    if (!hay || !needle || !needle[0]) return 0;
+    size_t n = strlen(needle);
+    for (const char *p = hay; *p; p++) {
+        if (strncasecmp(p, needle, n) == 0) return 1;
+    }
+    return 0;
+}
+
+static int ios_gpu_is_a16(id<MTLDevice> gpu) {
+    // Metal names the chip ("Apple A16 GPU"). A15 shares Apple8 and also lacks BC, so the name is the
+    // fork's filter. Architecture strings like applegpu_g15* are not relied on here.
+    const char *name = gpu.name.UTF8String ?: "";
+    if (str_contains_ci(name, "a16")) return 1;
+    NSString *arch = [(id)gpu respondsToSelector:@selector(architecture)] ? gpu.architecture.name : nil;
+    return str_contains_ci(arch.UTF8String ?: "", "a16");
+}
+
 const char *front_ios_device_check(void) {
     static char msg[320]; static int done;
     if (done++) return msg[0] ? msg : NULL;
-    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
-    if (gpu.supportsBCTextureCompression) return NULL;
-    snprintf(msg, sizeof msg, "This device's GPU (%s) cannot read BC-compressed textures, which the games use. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
-             gpu ? gpu.name.UTF8String : "no Metal device");
+    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init has its own policy in nvn_mtl.m)
+    if (!gpu) {
+        snprintf(msg, sizeof msg, "This device has no Metal GPU, which the games require.");
+        fprintf(stderr, "[RED] boot: %s\n", msg);
+        return msg;
+    }
+#if TARGET_OS_IPHONE
+    if (gpu.supportsBCTextureCompression) {
+        snprintf(msg, sizeof msg,
+                 "This build is for iPhone 15 and 15 Plus (A16) only. This device's GPU (%s) has native BC texture support (A17 Pro or later iPhone, or an M-series iPad), which this fork does not target.",
+                 gpu.name.UTF8String);
+        fprintf(stderr, "[RED] boot: %s\n", msg);
+        return msg;
+    }
+    if (ios_gpu_is_a16(gpu)) return NULL;
+    snprintf(msg, sizeof msg,
+             "This build is for iPhone 15 and 15 Plus (A16) only. This device's GPU (%s) is not supported (older than A16).",
+             gpu.name.UTF8String);
     fprintf(stderr, "[RED] boot: %s\n", msg);
     return msg;
+#else
+    (void)ios_gpu_is_a16;
+    return NULL;
+#endif
 }
 static void romfs_identity_report(NSString *doc) {
     romfs_id want, got;

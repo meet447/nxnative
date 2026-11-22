@@ -23,7 +23,7 @@ void dm_gamepad_active(void);
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
-const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
+const char *front_ios_device_check(void);   // main.m: why this device cannot run this A16-only fork (NULL = supported iPhone 15 / 15 Plus)
 bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
