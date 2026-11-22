@@ -46,6 +46,8 @@ FW=-framework Metal -framework MetalFX -framework Foundation -framework IOKit -f
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
 MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H) $(ASTCENC_LIB)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
+# Targets that link $(FW) without MTL_T_DEP still need the archive before the link line runs
+t_gfx_suspend t_nvn t_rt_comp t_present_crop t_mip_extent: $(ASTCENC_LIB)
 # CPU-only section walks, including every registration producer; ASan needs no prefix ignorelist.
 REGISTRATION_SRC=../gl/hle_gl.m ../../host/hle.c ../../host/hle_table.c ../../host/hle_sf.c ../nvn/nvn_mtl.m $(MTL_T_SRC)
 REGISTRATION_DEP=Makefile t_registration.m ../vk/hle_vk.m $(REGISTRATION_SRC) $(MTL_T_DEP)
