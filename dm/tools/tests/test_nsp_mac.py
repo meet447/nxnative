@@ -109,12 +109,14 @@ class Nvn(Base):
         self.build(False)
         self.assertEqual(self.build(False), self.sh / 'ios'); self.assertEqual(self.ran, [])
 
-    def test_ios_after_mac_keeps_mac_libraries(self):   # the Mac run command a Mac-only build printed still finds its libraries after an iOS build
+    def test_ios_after_mac_builds_ios_only(self):   # IPA does not recompile Mac metallibs; the next Mac build restores them (Metal cache)
         self.build(True)
         self.assertEqual(self.build(False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
-        self.assertEqual(self.ran[0][1]['DMSH_TARGETS'], 'mac,ios')
-        self.assertTrue(nsp.shader_lib.has_library(self.sh / 'cache' / f'b-{CHAIN}')); self.assertTrue(nsp.shader_lib.has_library(self.sh / 'ios' / f'b-{CHAIN}'))
-        self.assertEqual(self.build(True), self.sh / 'cache'); self.assertEqual(self.ran, [])   # both keys written: the Mac build is reused
+        self.assertEqual(self.ran[0][1]['DMSH_TARGETS'], 'ios')
+        self.assertTrue(nsp.shader_lib.has_library(self.sh / 'ios' / f'b-{CHAIN}'))
+        self.assertFalse((self.sh / f'mac-b-{CHAIN}.key').exists())   # Mac key not refreshed: next Mac build runs again
+        self.assertEqual(self.build(True), self.sh / 'cache'); self.assertEqual(len(self.ran), 1)
+        self.assertEqual(self.ran[0][1]['DMSH_TARGETS'], 'mac')
         self.assertEqual(self.build(False), self.sh / 'ios'); self.assertEqual(self.ran, [])
 
     def test_ios_after_mac_of_another_chain(self):   # libraries of another chain version are not this build's to keep

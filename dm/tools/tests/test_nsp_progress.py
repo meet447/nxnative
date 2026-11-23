@@ -153,20 +153,24 @@ class ShadersStale(unittest.TestCase):
         self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['chain', 'b-OLD', 'b-NEW', 2])
 
     def test_current_mac_does_not_hide_stale_ios(self):
+        # IPA selects ios only: a current Mac stamp must not hide a stale iOS chain; count is keys × 1
         caches = [('cache', 'b-NEW', ('x',), 'aaaa'), ('ios', 'b-OLD', ('x',), 'aaaa')]
         es = self.events(self.run_step('json', caches=caches, mac=False))
         self.assertEqual(len(es), 1)
-        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['chain', 2])
+        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['chain', 1])
 
     def test_count_uses_current_keys_not_historical_copies(self):
         caches = [('cache', 'b-OLD', ('a', 'removed'), 'aaaa'), ('cache', 'b-OLDER', ('a',), 'aaaa')]
         es = self.events(self.run_step('json', caches=caches, keys=('a', 'b', 'b')))
         self.assertEqual(es[0]['count'], 2)   # a and b, once each; removed is no longer built
 
-    def test_count_includes_both_selected_targets(self):
+    def test_count_is_keys_times_one_selected_target(self):
+        # IPA and Mac each build one target; inputs-stale count is keys × 1 (not mac+ios)
         caches = [('cache', 'b-NEW', ('x',), 'aaaa'), ('ios', 'b-NEW', ('x',), 'aaaa')]
         es = self.events(self.run_step('json', caches=caches, digest='bbbb', mac=False))
-        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['inputs', 2])
+        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['inputs', 1])
+        es = self.events(self.run_step('json', caches=caches, digest='bbbb', mac=True))
+        self.assertEqual([es[0][k] for k in ('reason', 'count')], ['inputs', 1])
 
     def test_ios_only_count_excludes_old_mac_libraries(self):
         caches = [('cache', 'b-OLD', ('x',), 'aaaa'), ('ios', 'b-OLD', ('x',), 'aaaa')]

@@ -87,6 +87,8 @@ static int pending_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
     return self;
 }
 - (void)dealloc { pthread_cond_destroy(&_cv); pthread_mutex_destroy(&_mu); }
+// nvn_mtl.m reads this on device setup (A16 no-BC path); the fake has no real Metal device to forward to
+- (BOOL)supportsBCTextureCompression { return YES; }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
     (void)descriptor;
     _texture_allocations++;
